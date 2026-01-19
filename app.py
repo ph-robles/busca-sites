@@ -1,30 +1,45 @@
 
+
 import re
 import unicodedata
 import streamlit as st
 import pandas as pd
-import folium
-from folium import Marker
-from streamlit_folium import st_folium
 
 # =========================
 # Carregar os dados
 # =========================
-df = pd.read_excel("enderecos.xlsx", engine="openpyxl")
+@st.cache_data(show_spinner=False)
+def carregar_dados(caminho: str) -> pd.DataFrame:
+    df = pd.read_excel(caminho, engine="openpyxl")
 
-# Padronizar nomes de colunas
-df.columns = df.columns.str.strip().str.lower()
-df = df.rename(columns={
-    'sigla_da_torre': 'sigla',
-    'nome_da_torre': 'nome',
-    'endereço': 'endereco',
-    'latitude': 'lat',
-    'longitude': 'lon'
-})
+    # Padronizar nomes de colunas
+    df.columns = df.columns.str.strip().str.lower()
+    df = df.rename(columns={
+        'sigla_da_torre': 'sigla',
+        'nome_da_torre': 'nome',
+        'endereço': 'endereco',
+        'latitude': 'lat',
+        'longitude': 'lon'
+    })
 
-# Corrigir vírgulas para pontos nas coordenadas e converter para float
-df['lat'] = df['lat'].astype(str).str.replace(',', '.').str.strip().astype(float)
-df['lon'] = df['lon'].astype(str).str.replace(',', '.').str.strip().astype(float)
+    # Corrigir vírgulas para pontos nas coordenadas e converter para float
+    df['lat'] = (
+        df['lat']
+        .astype(str).str.replace(',', '.', regex=False)
+        .str.strip()
+        .replace({'': pd.NA})
+        .astype(float)
+    )
+    df['lon'] = (
+        df['lon']
+        .astype(str).str.replace(',', '.', regex=False)
+        .str.strip()
+        .replace({'': pd.NA})
+        .astype(float)
+    )
+    return df
+
+df = carregar_dados("enderecos.xlsx")
 
 # =========================
 # Funções de extração de cidade (robustas)
@@ -104,7 +119,7 @@ def parece_logradouro(s: str) -> bool:
 UF_PATTERN = r"(RJ|SP|MG|ES|PR|SC|RS|BA|PE|CE|PA|AM|GO|MT|MS|DF)"
 
 def extrair_cidade(nome: str) -> str | None:
-    """Extrai cidade priorizando 'CIDADE - ...'; se falhar, tenta último município presente no texto."""
+    """Extrai cidade priorizando 'CIDADE - ...'; fallback: último município presente no texto; evita logradouro."""
     if not isinstance(nome, str) or not nome.strip():
         return None
     s = nome.strip()
@@ -121,9 +136,7 @@ def extrair_cidade(nome: str) -> str | None:
                 key = strip_accents(cand_norm).lower()
                 if key in MUNICIPIOS_IDX:
                     return MUNICIPIOS_IDX[key]
-                # Se não mapeou exatamente, devolve a forma normalizada (pode ser cidade válida)
-                # Ex.: "Rio De Janeiro" -> "Rio de Janeiro"
-                return cand_norm
+                return cand_norm  # pode ser cidade válida mesmo se não bater com a lista
 
     # 2) Sem hífen (ou não bateu): evitar endereços
     if parece_logradouro(s):
@@ -140,7 +153,7 @@ def extrair_cidade(nome: str) -> str | None:
                 ultimo = nome_mun
     return ultimo
 
-# 4) Aplicar ao DataFrame + aliases úteis
+# Aplicar ao DataFrame + aliases úteis
 df['cidade'] = df['nome'].apply(extrair_cidade)
 ALIASES = {
     "Seropedica": "Seropédica",
@@ -154,13 +167,14 @@ df['cidade'] = df['cidade'].replace(ALIASES)
 # =========================
 # UI
 # =========================
+st.set_page_config(page_title="Endereços dos Sites RJ", page_icon="📡", layout="wide")
 st.title("📡 Endereços dos Sites RJ")
 
 # ---- Filtros (3 colunas) ----
 col1, col2, col3 = st.columns([1.2, 1.2, 1.6])
 
 with col1:
-    # Formulário só para a busca de SIGLA + botão OK
+    # Formulário para a busca de SIGLA + botão OK
     with st.form("form_sigla", clear_on_submit=False):
         sigla_input_val = st.text_input("🔍 Buscar por sigla:", value=st.session_state.get("sigla_input", ""))
         ok_busca = st.form_submit_button("OK")
@@ -168,18 +182,18 @@ with col1:
             st.session_state["sigla_commit"] = sigla_input_val
             st.session_state["sigla_input"] = sigla_input_val
 
-    # Valor de filtro efetivo (só muda quando clica OK)
+    # Valor de filtro efetivo (só muda ao clicar OK)
     sigla_filtro = st.session_state.get("sigla_commit", "")
 
 with col2:
     somente_reconhecida = st.checkbox("✅ Somente entradas com cidade reconhecida", value=True)
 
-    # Select de cidade: SEM None e ordenado alfabeticamente
+    # Select de cidade: SEM None e ordenado
     cidades_unicas = sorted(df['cidade'].dropna().unique().tolist())
     cidade_opcao = st.selectbox("🏙️ Filtrar por Localidade:", options=["Todas"] + cidades_unicas)
 
 with col3:
-    # Select de nome da torre (ordenado — opcionalmente você pode tornar dinâmico após filtrar por cidade)
+    # Select de nome da torre (lista completa; pode ser dinâmica por cidade se desejar)
     nomes_unicos = sorted(df['nome'].dropna().unique().tolist())
     nome_opcao = st.selectbox("📍 Filtrar por nome da torre:", options=["Todas"] + nomes_unicos)
 
@@ -201,51 +215,31 @@ if nome_opcao != "Todas":
     df_filtrado = df_filtrado[df_filtrado['nome'] == nome_opcao]
 
 # =========================
-# Resultados
+# Resultados (SEM MAPA)
 # =========================
 if df_filtrado.empty:
     st.warning("⚠️ Nenhum site encontrado com os filtros selecionados.")
 else:
     st.success(f"🔎 {len(df_filtrado)} Site(s) encontrado(s).")
 
-    # Mostrar tabela com resultados (já com cidade)
-    st.dataframe(df_filtrado[['sigla', 'cidade', 'nome', 'endereco', 'lat', 'lon']], use_container_width=True)
+    # Tabela com resultados
+    st.dataframe(
+        df_filtrado[['sigla', 'cidade', 'nome', 'endereco', 'lat', 'lon']],
+        use_container_width=True
+    )
 
-    # Criar mapa com marcadores (ignora linhas sem coordenadas)
-    df_plot = df_filtrado.dropna(subset=['lat', 'lon'])
-    if df_plot.empty:
-        st.info("ℹ️ Não há coordenadas válidas para exibir no mapa.")
-    else:
-        lat_center = df_plot['lat'].mean()
-        lon_center = df_plot['lon'].mean()
-        zoom = 15 if len(df_plot) == 1 else 11
-
-        mapa = folium.Map(location=[lat_center, lon_center], zoom_start=zoom)
-
-        for _, row in df_plot.iterrows():
-            maps_url = f"https://www.google.com/maps/search/?api=1&query={row['lat']},{row['lon']}"
-            popup_html = f"""
-            <b>{row['sigla']} - {row['nome']}</b><br>
-            <i>{row.get('cidade') or ''}</i><br>
-            📌 {row['endereco']}<br>
-            {maps_url}🗺️ Ver no Google Maps</a>
-            """
-            Marker(
-                location=[row['lat'], row['lon']],
-                popup=folium.Popup(popup_html, max_width=320),
-                tooltip=row['endereco']
-            ).add_to(mapa)
-
-        st_folium(mapa, width=800, height=520)
-
-    # Mostrar detalhes com link para Google Maps
+    # Detalhes com link para o Google Maps
     st.markdown("### 📍 Detalhes dos sites encontrados")
     for _, row in df_filtrado.iterrows():
         maps_url = f"https://www.google.com/maps/search/?api=1&query={row['lat']},{row['lon']}"
-        st.markdown(f"**{row['sigla']} - {row['nome']}**  \n"
-                    f"🏙️ **Cidade:** {row.get('cidade') or '—'}  \n"
-                    f"📌 **Endereço:** {row['endereco']}")
+        st.markdown(
+            f"**{row['sigla']} - {row['nome']}**  \n"
+            f"🏙️ **Cidade:** {row.get('cidade') or '—'}  \n"
+            f"📌 **Endereço:** {row['endereco']}"
+        )
         st.link_button("🗺️ Ver no Google Maps", maps_url, type="primary")
         st.markdown("---")
+
+
 
 
