@@ -256,11 +256,9 @@ Contributions, issues, and pull requests are welcome!
 **Raphael Soares Robles De Franca**  
 Developer focused on Python solutions for telecom, electrical engineering, and IT.
 
+
 versão PT/BR 
 
-Claro, Raphael! Segue um **README.md** completinho (em PT-BR) para você colar no GitHub do seu app Streamlit. Se quiser, eu gero também uma versão em inglês.
-
-***
 
 # 📡 Endereços dos Sites RJ
 
