@@ -1,8 +1,3 @@
-Here is the **English version of your README**, professionally written and ready to paste into GitHub.  
-If you want, I can also generate a **short version**, a **GitHub‑optimized version with badges**, or a **landing‑page style version**.
-
-***
-
 # 📡 RJ Sites Address Viewer
 
 A **Streamlit application** for searching, filtering, and visualizing telecom sites/towers in the state of Rio de Janeiro (RJ) using data from an Excel spreadsheet.  
