@@ -1,8 +1,9 @@
-# app.py
 
+# app.py
 # ============================================================
 # 📡 Endereços dos Sites RJ (sem mapa) + Detentora + Técnicos (aba "acessos")
-# Com: alias robusto p/ 'detentora', botão limpar cache, diagnóstico em expander
+# Com: correção de sheet_name=None, alias robusto p/ 'detentora',
+# botão limpar cache, diagnóstico em expander.
 # ============================================================
 
 import re
@@ -24,12 +25,31 @@ def strip_accents(s: str) -> str:
     return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
 
 # ----------------------------------------
-# Leitura da planilha principal
+# Leitura da planilha principal (corrigido p/ sheet_name=None)
 # ----------------------------------------
 @st.cache_data(show_spinner=False)
-def carregar_dados_principais(caminho: str, sheet_name=None) -> pd.DataFrame:
-    # Se você tiver uma aba específica, passe sheet_name="dados"
-    df = pd.read_excel(caminho, engine="openpyxl", sheet_name=sheet_name)
+def carregar_dados_principais(caminho: str, sheet_name: str | int | None = None) -> pd.DataFrame:
+    """
+    Lê a planilha principal.
+    - Se sheet_name=None: usa a PRIMEIRA aba do arquivo.
+    - Se sheet_name for nome/índice: lê a aba indicada.
+    Retorna sempre um DataFrame.
+    """
+    xls = pd.ExcelFile(caminho, engine="openpyxl")
+    sheet_names = xls.sheet_names
+
+    # Escolhe a aba
+    if sheet_name is None:
+        sheet_to_read = sheet_names[0]  # primeira aba
+    else:
+        sheet_to_read = sheet_name
+
+    # Lê a aba escolhida
+    df = pd.read_excel(xls, sheet_name=sheet_to_read, engine="openpyxl")
+
+    # Guarda diagnóstico de abas na sessão (para mostrar no expander)
+    st.session_state["_sheet_diag"] = sheet_names
+    st.session_state["_sheet_used"] = sheet_to_read
 
     # Padroniza nomes de colunas
     df.columns = df.columns.str.strip().str.lower()
@@ -44,7 +64,6 @@ def carregar_dados_principais(caminho: str, sheet_name=None) -> pd.DataFrame:
     })
 
     # --- DETENTORA: mapeamento robusto ---
-    # Se sua coluna já é 'detentora', ótimo; isso aqui cobre variações comuns.
     ALIAS_DETENTORA = {
         'detentora', 'nome_da_detentora', 'nome detentora',
         'proprietaria', 'proprietária', 'operadora',
@@ -54,11 +73,7 @@ def carregar_dados_principais(caminho: str, sheet_name=None) -> pd.DataFrame:
     col_detentora = None
     for c in df.columns:
         c_clean = c.strip().lower()
-        if c_clean in ALIAS_DETENTORA:
-            col_detentora = c
-            break
-        # fallback por palavras-chave
-        if any(k in c_clean for k in ['detentor', 'propriet', 'operad', 'respons']):
+        if c_clean in ALIAS_DETENTORA or any(k in c_clean for k in ['detentor', 'propriet', 'operad', 'respons']):
             col_detentora = c
             break
     if col_detentora and col_detentora != 'detentora':
@@ -76,7 +91,7 @@ def carregar_dados_principais(caminho: str, sheet_name=None) -> pd.DataFrame:
             .replace({"": pd.NA}).astype(float)
         )
 
-    # Coluna detentora garantida
+    # Garante a coluna detentora
     if 'detentora' not in df.columns:
         df['detentora'] = pd.NA
 
@@ -100,6 +115,10 @@ def carregar_dados_principais(caminho: str, sheet_name=None) -> pd.DataFrame:
 # ----------------------------------------
 @st.cache_data(show_spinner=False)
 def carregar_acessos_ok(caminho: str) -> pd.DataFrame | None:
+    """
+    Lê a aba 'acessos' e retorna somente linhas com status == 'ok',
+    normalizando colunas ('sigla', 'tecnico', 'status').
+    """
     try:
         xls = pd.ExcelFile(caminho, engine="openpyxl")
         sheet = next((s for s in xls.sheet_names if s.strip().lower() == "acessos"), None)
@@ -133,8 +152,8 @@ def carregar_acessos_ok(caminho: str) -> pd.DataFrame | None:
         for c in set(acc.columns) & {"sigla", "tecnico", "status"}:
             acc[c] = acc[c].astype("string").str.strip()
 
-        # Filtra apenas status ok (case-insensitive, sem acento)
-        def norm(x):
+        # Filtra status ok (case-insensitive, sem acento)
+        def norm(x: str) -> str:
             return "".join(ch for ch in unicodedata.normalize("NFD", str(x)) if unicodedata.category(ch) != "Mn").lower()
 
         acc = acc[acc["status"].apply(norm) == "ok"]
@@ -150,11 +169,10 @@ def carregar_acessos_ok(caminho: str) -> pd.DataFrame | None:
         return None
 
 # ----------------------------------------
-# Carregar dados
+# Carregar dados (ajuste sheet_name="dados" se sua aba principal tiver nome fixo)
 # ----------------------------------------
 CAMINHO = "enderecos.xlsx"
-# Se a planilha principal tiver uma aba específica, troque para sheet_name="dados"
-df = carregar_dados_principais(CAMINHO, sheet_name=None)
+df = carregar_dados_principais(CAMINHO, sheet_name=None)  # usa a PRIMEIRA aba por padrão
 ACESSOS_OK = carregar_acessos_ok(CAMINHO)
 
 # ----------------------------------------
@@ -241,9 +259,9 @@ def extrair_cidade(nome: str) -> str | None:
     s_key = strip_accents(s).lower()
     ultimo = None; pos = -1
     for key, nome_mun in MUNICIPIOS_IDX.items():
-        for m in re.finditer(rf"(?:^|\b|\s){re.escape(key)}(?:$|\b|\s|,|-|/)", s_key):
-            if m.start() > pos:
-                pos = m.start(); ultimo = nome_mun
+        for m2 in re.finditer(rf"(?:^|\b|\s){re.escape(key)}(?:$|\b|\s|,|-|/)", s_key):
+            if m2.start() > pos:
+                pos = m2.start(); ultimo = nome_mun
     return ultimo
 
 df["cidade"] = df["nome"].apply(extrair_cidade)
@@ -268,6 +286,8 @@ if st.button("🔄 Atualizar dados (limpar cache)"):
 # Diagnóstico (pode ocultar depois)
 # ----------------------------------------
 with st.expander("🧪 Diagnóstico (temporário)"):
+    st.write("Abas encontradas no arquivo:", st.session_state.get("_sheet_diag"))
+    st.write("Aba utilizada:", st.session_state.get("_sheet_used"))
     st.write("Colunas lidas na planilha principal:", list(df.columns))
     try:
         st.write(df[['sigla', 'nome', 'detentora']].head(10))
@@ -365,7 +385,8 @@ else:
         st.link_button("🗺️ Ver no Google Maps", maps_url, type="primary")
         st.markdown("---")
 
-st.caption("Feito com ❤️ em Streamlit • Dados: enderecos.xlsx (planilha principal) • Técnicos: aba 'acessos' (status='ok')")
+st.caption("Feito com ❤️ em Streamlit • Dados: enderecos.xlsx (primeira aba) • Técnicos: aba 'acessos' (status='ok')")
+
 
 
 
