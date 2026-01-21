@@ -1,9 +1,10 @@
 
+
 # app.py
 # ============================================================
 # 📡 Endereços dos Sites RJ (sem mapa) + Detentora + Técnicos (aba "acessos")
-# Com: correção de sheet_name=None, alias robusto p/ 'detentora',
-# botão limpar cache, diagnóstico em expander.
+# Remoção: "Filtrar por localidade", "Filtrar por nome da torre" e "Diagnóstico (temporário)"
+# Mantido: busca por sigla e botão de limpar cache.
 # ============================================================
 
 import re
@@ -46,10 +47,6 @@ def carregar_dados_principais(caminho: str, sheet_name: str | int | None = None)
 
     # Lê a aba escolhida
     df = pd.read_excel(xls, sheet_name=sheet_to_read, engine="openpyxl")
-
-    # Guarda diagnóstico de abas na sessão (para mostrar no expander)
-    st.session_state["_sheet_diag"] = sheet_names
-    st.session_state["_sheet_used"] = sheet_to_read
 
     # Padroniza nomes de colunas
     df.columns = df.columns.str.strip().str.lower()
@@ -215,7 +212,7 @@ def smart_title_pt(s: str) -> str:
             out.append(low); continue
         out.append(low.capitalize())
     s2 = "".join(out)
-    s2 = re.sub(r"\bD'’", lambda m: "d’" + m.group(1).upper(), s2)
+    # Observação: etapa opcional para ajustar "d’X" pode ser personalizada se necessário.
     s2 = re.sub(r"\s+", " ", s2).strip()
     s2 = re.sub(r"\s*-\s*", "-", s2)
     return s2
@@ -283,59 +280,22 @@ if st.button("🔄 Atualizar dados (limpar cache)"):
     st.experimental_rerun()
 
 # ----------------------------------------
-# Diagnóstico (pode ocultar depois)
+# UI – Apenas busca por sigla
 # ----------------------------------------
-with st.expander("🧪 Diagnóstico (temporário)"):
-    st.write("Abas encontradas no arquivo:", st.session_state.get("_sheet_diag"))
-    st.write("Aba utilizada:", st.session_state.get("_sheet_used"))
-    st.write("Colunas lidas na planilha principal:", list(df.columns))
-    try:
-        st.write(df[['sigla', 'nome', 'detentora']].head(10))
-    except Exception:
-        st.write("Não foi possível exibir amostra de ['sigla', 'nome', 'detentora'].")
-    st.write("Registros com 'detentora' preenchida:", int(df['detentora'].notna().sum()))
-
-    if ACESSOS_OK is not None:
-        st.write("Aba 'acessos' carregada:", ACESSOS_OK.shape)
-        st.write(ACESSOS_OK.head(10))
-    else:
-        st.write("Aba 'acessos' não encontrada ou sem colunas mínimas.")
+with st.form("form_sigla", clear_on_submit=False):
+    sigla_input_val = st.text_input("🔍 Buscar por sigla:", value=st.session_state.get("sigla_input", ""))
+    ok_busca = st.form_submit_button("OK")
+    if ok_busca:
+        st.session_state["sigla_commit"] = sigla_input_val
+        st.session_state["sigla_input"] = sigla_input_val
+sigla_filtro = st.session_state.get("sigla_commit", "")
 
 # ----------------------------------------
-# UI – Filtros (sem filtro de cidade reconhecida)
-# ----------------------------------------
-col1, col2, col3 = st.columns([1.2, 1.2, 1.6])
-
-with col1:
-    with st.form("form_sigla", clear_on_submit=False):
-        sigla_input_val = st.text_input("🔍 Buscar por sigla:", value=st.session_state.get("sigla_input", ""))
-        ok_busca = st.form_submit_button("OK")
-        if ok_busca:
-            st.session_state["sigla_commit"] = sigla_input_val
-            st.session_state["sigla_input"] = sigla_input_val
-    sigla_filtro = st.session_state.get("sigla_commit", "")
-
-with col2:
-    cidades_unicas = sorted(df["cidade"].dropna().unique().tolist())
-    cidade_opcao = st.selectbox("🏙️ Filtrar por Localidade:", ["Todas"] + cidades_unicas)
-
-with col3:
-    nomes_unicos = sorted(df["nome"].dropna().unique().tolist())
-    nome_opcao = st.selectbox("📍 Filtrar por nome da torre:", ["Todas"] + nomes_unicos)
-
-# ----------------------------------------
-# Aplicar filtros
+# Aplicar filtro (somente por sigla)
 # ----------------------------------------
 df_filtrado = df.copy()
-
 if sigla_filtro:
     df_filtrado = df_filtrado[df_filtrado["sigla"].astype(str).str.upper() == sigla_filtro.upper()]
-
-if cidade_opcao != "Todas":
-    df_filtrado = df_filtrado[df_filtrado["cidade"] == cidade_opcao]
-
-if nome_opcao != "Todas":
-    df_filtrado = df_filtrado[df_filtrado["nome"] == nome_opcao]
 
 # ----------------------------------------
 # Técnicos da aba ACESSOS_OK
@@ -385,7 +345,8 @@ else:
         st.link_button("🗺️ Ver no Google Maps", maps_url, type="primary")
         st.markdown("---")
 
-st.caption("Feito com ❤️ em Streamlit • Dados: enderecos.xlsx (primeira aba) • Técnicos: aba 'acessos' (status='ok')")
+st.caption("Dev Raphael Robles - Streamlit • Data ")
+
 
 
 
