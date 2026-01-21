@@ -219,12 +219,13 @@ else:
             url = f"https://www.google.com/maps/search/?api=1&query={row['lat']},{row['lon']}"
             st.link_button("🗺️ Ver no Google Maps", url, type="primary")
 
-        st.markdown("---"
+        st.markdown("---")
 
 
 
 
 st.caption("Feito com ❤️ em Streamlit — Dev Raphael Robles 🚀")
+
 
 
 
