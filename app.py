@@ -211,7 +211,7 @@ else:
             f"**{row['sigla']} — {row['nome']}**  \n"
             f"🏙️ Cidade: {row.get('cidade') or '—'}  \n"
             f"🏢 Detentora: {det}  \n"
-            f"👤 Técnicos: {', '.join(tecs) if tecs else '—'}  \n"
+            f"👤 Técnicos com acesso liberado : {', '.join(tecs) if tecs else '—'}  \n"
             f"📌 Endereço: {row['endereco']}"
         )
 
@@ -225,6 +225,7 @@ else:
 
 
 st.caption("Feito com ❤️ em Streamlit — Dev Raphael Robles 🚀")
+
 
 
 
