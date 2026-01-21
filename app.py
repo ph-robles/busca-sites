@@ -1,11 +1,10 @@
-
-
 # ============================================================
 # 📡 Endereços dos Sites RJ — Versão OTIMIZADA e ESTÁVEL
 # - Lê aba "enderecos" com colunas reais da sua planilha
 # - Busca por SIGLA
 # - Técnicos (aba "acessos") com status ok
-# - Link para Google Maps
+# - Link para Google Maps logo abaixo do título do site
+# - Técnicos em caixa de destaque (st.info), um por linha
 # - Sem filtros extras e sem diagnóstico
 # ============================================================
 
@@ -195,7 +194,8 @@ else:
         use_container_width=True
     )
 
-    st.markdown("### 📍 Detalhes dos sites encontrados")
+    # Título geral
+    st.markdown("### 📍 Detalhes do(s) site(s) encontrado(s)")
 
     def tecnicos_por_sigla(sig: str):
         if ACESSOS_OK is None or ACESSOS_OK.empty:
@@ -204,27 +204,37 @@ else:
         return sorted(temp["tecnico"].dropna().unique().tolist())
 
     for _, row in df_f.iterrows():
-        det = row["detentora"] if pd.notna(row["detentora"]) else "—"
-        tecs = tecnicos_por_sigla(row["sigla"])
+        # Título do site
+        st.markdown(f"**{row['sigla']} — {row['nome']}**")
 
-        st.markdown(
-            f"**{row['sigla']} — {row['nome']}**  \n"
-            f"🏙️ Cidade: {row.get('cidade') or '—'}  \n"
-            f"🏢 Detentora: {det}  \n"
-            f"👤 Técnicos com acesso liberado : {', '.join(tecs) if tecs else '—'}  \n"
-            f"📌 Endereço: {row['endereco']}"
-        )
-
+        # Botão do Google Maps logo abaixo do título
         if pd.notna(row.get("lat")) and pd.notna(row.get("lon")):
             url = f"https://www.google.com/maps/search/?api=1&query={row['lat']},{row['lon']}"
             st.link_button("🗺️ Ver no Google Maps", url, type="primary")
+
+        # Campos do site
+        det = row["detentora"] if pd.notna(row["detentora"]) else "—"
+        st.markdown(
+            f"🏙️ **Cidade:** {row.get('cidade') or '—'}  \n"
+            f"🏢 **Detentora:** {det}  \n"
+            f"📌 **Endereço:** {row['endereco']}"
+        )
+
+        # Técnicos em caixa de destaque, um por linha
+        tecnicos = tecnicos_por_sigla(row["sigla"])
+        if tecnicos:
+            lista_md = "\n".join([f"- {t}" for t in tecnicos])
+        else:
+            lista_md = "—"
+
+        st.info(f"**👤 Técnicos com acesso liberado:**\n{lista_md}")
 
         st.markdown("---")
 
 
 
-
 st.caption("Feito com ❤️ em Streamlit — Dev Raphael Robles 🚀")
+
 
 
 
