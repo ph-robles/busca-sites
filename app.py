@@ -1,10 +1,11 @@
 
 
-# app.py
+
 # ============================================================
-# 📡 Endereços dos Sites RJ (sem mapa) + Detentora + Técnicos (aba "acessos")
-# Remoção: "Filtrar por localidade", "Filtrar por nome da torre" e "Diagnóstico (temporário)"
-# Mantido: busca por sigla e botão de limpar cache.
+# 📡 Endereços dos Sites RJ — Versão OTIMIZADA
+# Removido: filtros extras, diagnóstico e cálculos globais pesados.
+# Mantido: busca por SIGLA, mapa, técnicos da aba "acessos".
+# Cidade é calculada somente após filtrar (muito mais rápido!).
 # ============================================================
 
 import re
@@ -12,169 +13,126 @@ import unicodedata
 import streamlit as st
 import pandas as pd
 
-# ----------------------------------------
-# Configuração de página
-# ----------------------------------------
+# ------------------------------------------------------------
+# Configuração inicial
+# ------------------------------------------------------------
 st.set_page_config(page_title="Endereços dos Sites RJ", page_icon="📡", layout="wide")
 
-# ----------------------------------------
-# Utilitários
-# ----------------------------------------
-def strip_accents(s: str) -> str:
+# ------------------------------------------------------------
+# Funções auxiliares
+# ------------------------------------------------------------
+def strip_accents(s: str):
     if not isinstance(s, str):
         return s
     return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
 
-# ----------------------------------------
-# Leitura da planilha principal (corrigido p/ sheet_name=None)
-# ----------------------------------------
+
+# ------------------------------------------------------------
+# Carregar planilha principal — AGORA MAIS RÁPIDO
+# (Lê diretamente a *aba fixa* "dados")
+# ------------------------------------------------------------
 @st.cache_data(show_spinner=False)
-def carregar_dados_principais(caminho: str, sheet_name: str | int | None = None) -> pd.DataFrame:
-    """
-    Lê a planilha principal.
-    - Se sheet_name=None: usa a PRIMEIRA aba do arquivo.
-    - Se sheet_name for nome/índice: lê a aba indicada.
-    Retorna sempre um DataFrame.
-    """
-    xls = pd.ExcelFile(caminho, engine="openpyxl")
-    sheet_names = xls.sheet_names
+def carregar_dados():
+    df = pd.read_excel(
+        "enderecos.xlsx",
+        sheet_name="dados",        # <- muito mais rápido que scan de abas
+        engine="openpyxl"
+    )
 
-    # Escolhe a aba
-    if sheet_name is None:
-        sheet_to_read = sheet_names[0]  # primeira aba
-    else:
-        sheet_to_read = sheet_name
-
-    # Lê a aba escolhida
-    df = pd.read_excel(xls, sheet_name=sheet_to_read, engine="openpyxl")
-
-    # Padroniza nomes de colunas
     df.columns = df.columns.str.strip().str.lower()
 
-    # Renomeia colunas padrão
-    df = df.rename(columns={
+    rename_map = {
         "sigla_da_torre": "sigla",
         "nome_da_torre": "nome",
         "endereço": "endereco",
         "latitude": "lat",
         "longitude": "lon",
-    })
-
-    # --- DETENTORA: mapeamento robusto ---
-    ALIAS_DETENTORA = {
-        'detentora', 'nome_da_detentora', 'nome detentora',
-        'proprietaria', 'proprietária', 'operadora',
-        'empresa_detentora', 'empresa detentora',
-        'responsavel_site', 'responsável_site', 'responsavel', 'responsável'
     }
-    col_detentora = None
+    df = df.rename(columns=rename_map)
+
+    # Detentora – mapeamento robusto
+    ALIAS = [
+        "detentora", "nome_da_detentora", "nome detentora", "proprietaria",
+        "proprietária", "operadora", "empresa_detentora", "empresa detentora",
+        "responsavel_site", "responsável_site", "responsavel", "responsável"
+    ]
     for c in df.columns:
-        c_clean = c.strip().lower()
-        if c_clean in ALIAS_DETENTORA or any(k in c_clean for k in ['detentor', 'propriet', 'operad', 'respons']):
-            col_detentora = c
+        if any(a in c.lower() for a in ALIAS):
+            df = df.rename(columns={c: "detentora"})
             break
-    if col_detentora and col_detentora != 'detentora':
-        df = df.rename(columns={col_detentora: 'detentora'})
 
-    # Coordenadas: vírgula -> ponto
-    if 'lat' in df.columns:
-        df['lat'] = (
-            df['lat'].astype(str).str.replace(",", ".", regex=False).str.strip()
-            .replace({"": pd.NA}).astype(float)
-        )
-    if 'lon' in df.columns:
-        df['lon'] = (
-            df['lon'].astype(str).str.replace(",", ".", regex=False).str.strip()
-            .replace({"": pd.NA}).astype(float)
-        )
-
-    # Garante a coluna detentora
-    if 'detentora' not in df.columns:
-        df['detentora'] = pd.NA
-
-    # Normaliza detentora
-    df['detentora'] = (
-        df['detentora']
-        .astype('string')
-        .str.strip()
-        .replace({'': pd.NA, 'nan': pd.NA, 'NaN': pd.NA, 'None': pd.NA})
-    )
-
-    # Normaliza campos-chave
+    # Normalizar colunas
     for col in ["sigla", "nome", "endereco"]:
         if col in df.columns:
             df[col] = df[col].astype("string").str.strip()
 
+    # Coordenadas com ponto
+    for col in ["lat", "lon"]:
+        if col in df.columns:
+            df[col] = (
+                df[col].astype(str)
+                .str.replace(",", ".", regex=False)
+                .replace("", pd.NA)
+                .astype(float)
+            )
+
+    if "detentora" not in df.columns:
+        df["detentora"] = pd.NA
+
     return df
 
-# ----------------------------------------
-# Leitura da aba "acessos" — status OK
-# ----------------------------------------
+
+# ------------------------------------------------------------
+# Carregar aba "acessos" (somente status OK)
+# ------------------------------------------------------------
 @st.cache_data(show_spinner=False)
-def carregar_acessos_ok(caminho: str) -> pd.DataFrame | None:
-    """
-    Lê a aba 'acessos' e retorna somente linhas com status == 'ok',
-    normalizando colunas ('sigla', 'tecnico', 'status').
-    """
+def carregar_acessos_ok():
     try:
-        xls = pd.ExcelFile(caminho, engine="openpyxl")
-        sheet = next((s for s in xls.sheet_names if s.strip().lower() == "acessos"), None)
-        if not sheet:
-            return None
-
-        acc = pd.read_excel(xls, sheet_name=sheet, engine="openpyxl")
-        acc.columns = acc.columns.str.strip().str.lower()
-
-        # Normaliza colunas esperadas
-        if "tecnico" not in acc.columns:
-            for alt in ["técnico", "nome_tecnico", "nome do tecnico", "colaborador"]:
-                if alt in acc.columns:
-                    acc = acc.rename(columns={alt: "tecnico"})
-                    break
-
-        if "sigla" not in acc.columns:
-            for alt in ["sigla_da_torre", "site", "torre"]:
-                if alt in acc.columns:
-                    acc = acc.rename(columns={alt: "sigla"})
-                    break
-
-        # Checagem mínima
-        if "sigla" not in acc.columns or "tecnico" not in acc.columns:
-            return None
-
-        if "status" not in acc.columns:
-            acc["status"] = "ok"
-
-        # Tipos e limpeza
-        for c in set(acc.columns) & {"sigla", "tecnico", "status"}:
-            acc[c] = acc[c].astype("string").str.strip()
-
-        # Filtra status ok (case-insensitive, sem acento)
-        def norm(x: str) -> str:
-            return "".join(ch for ch in unicodedata.normalize("NFD", str(x)) if unicodedata.category(ch) != "Mn").lower()
-
-        acc = acc[acc["status"].apply(norm) == "ok"]
-
-        # Remove vazios
-        acc = acc[
-            acc["sigla"].notna() & (acc["sigla"] != "") &
-            acc["tecnico"].notna() & (acc["tecnico"] != "")
-        ]
-
-        return acc.reset_index(drop=True)
+        acc = pd.read_excel("enderecos.xlsx", sheet_name="acessos", engine="openpyxl")
     except Exception:
         return None
 
-# ----------------------------------------
-# Carregar dados (ajuste sheet_name="dados" se sua aba principal tiver nome fixo)
-# ----------------------------------------
-CAMINHO = "enderecos.xlsx"
-df = carregar_dados_principais(CAMINHO, sheet_name=None)  # usa a PRIMEIRA aba por padrão
-ACESSOS_OK = carregar_acessos_ok(CAMINHO)
+    acc.columns = acc.columns.str.strip().str.lower()
 
-# ----------------------------------------
-# Extração da cidade (robusta)
-# ----------------------------------------
+    if "tecnico" not in acc.columns:
+        for alt in ["técnico", "nome_tecnico", "colaborador"]:
+            if alt in acc.columns:
+                acc = acc.rename(columns={alt: "tecnico"})
+                break
+
+    if "sigla" not in acc.columns:
+        for alt in ["sigla_da_torre", "site", "torre"]:
+            if alt in acc.columns:
+                acc = acc.rename(columns={alt: "sigla"})
+                break
+
+    if "sigla" not in acc.columns or "tecnico" not in acc.columns:
+        return None
+
+    if "status" not in acc.columns:
+        acc["status"] = "ok"
+
+    # Normalizar
+    for c in ["sigla", "tecnico", "status"]:
+        acc[c] = acc[c].astype("string").str.strip()
+
+    # Filtrar apenas status ok
+    def norm(x): return strip_accents(str(x)).lower()
+    acc = acc[acc["status"].apply(norm) == "ok"]
+
+    return acc.reset_index(drop=True)
+
+
+# ------------------------------------------------------------
+# Tabela e acessos
+# ------------------------------------------------------------
+df = carregar_dados()
+ACESSOS_OK = carregar_acessos_ok()
+
+
+# ------------------------------------------------------------
+# Extrair cidade – agora só é usado após filtrar (MUITO MAIS RÁPIDO)
+# ------------------------------------------------------------
 MUNICIPIOS_RJ = [
     "Angra dos Reis", "Aperibé", "Araruama", "Areal", "Armação dos Búzios", "Arraial do Cabo",
     "Barra do Piraí", "Barra Mansa", "Belford Roxo", "Bom Jardim", "Bom Jesus do Itabapoana",
@@ -194,158 +152,82 @@ MUNICIPIOS_RJ = [
     "Varre-Sai", "Vassouras", "Volta Redonda",
 ]
 MUNICIPIOS_IDX = {strip_accents(n).lower(): n for n in MUNICIPIOS_RJ}
-PREPOSICOES_PT = {"de", "da", "das", "do", "dos", "e", "d'", "d’"}
-UF_PATTERN = r"(RJ|SP|MG|ES|PR|SC|RS|BA|PE|CE|PA|AM|GO|MT|MS|DF)"
 
-def smart_title_pt(s: str) -> str:
-    if not isinstance(s, str) or not s.strip():
-        return s
-    tokens = re.split(r"(\s+|-|’|')", s.strip())
-    out = []
-    for i, tok in enumerate(tokens):
-        if re.fullmatch(r"\s+|-|’|'", tok or ""):
-            out.append(tok); continue
-        if re.fullmatch(r"[A-Z]{2,3}", tok or ""):
-            out.append(tok); continue
-        low = tok.lower()
-        if i != 0 and low in PREPOSICOES_PT:
-            out.append(low); continue
-        out.append(low.capitalize())
-    s2 = "".join(out)
-    # Observação: etapa opcional para ajustar "d’X" pode ser personalizada se necessário.
-    s2 = re.sub(r"\s+", " ", s2).strip()
-    s2 = re.sub(r"\s*-\s*", "-", s2)
-    return s2
 
-def parece_logradouro(s: str) -> bool:
-    if not isinstance(s, str):
-        return False
-    t = strip_accents(s).upper()
-    if " COM " in t or " C/ " in t or " R." in t or " AV." in t:
-        return True
-    prefixo = t.split()[0] if t.split() else ""
-    if prefixo in ["R","R.","RUA","AV","AV.","AVENIDA","AL","AL.","ALAMEDA","TRAV","TRAV.","TRAVESSA",
-                   "ROD","ROD.","RODOVIA","ESTR","ESTR.","ESTRADA","LGO","LARGO","PÇA","PCA","PRAÇA"]:
-        return True
-    if sum(ch.isdigit() for ch in t) >= 3 and "-" not in s:
-        return True
-    return False
-
-def extrair_cidade(nome: str) -> str | None:
-    if not isinstance(nome, str) or not nome.strip():
+def detectar_cidade(nome):
+    """Executa extração de cidade apenas sob demanda (rápido)."""
+    if not isinstance(nome, str):
         return None
-    s = nome.strip()
-
-    # Prioriza "CIDADE - ..."
-    if "-" in s:
-        parte = s.split("-", 1)[0].strip()
-        parte = re.sub(rf"[\s/,-]*{UF_PATTERN}$", "", parte, flags=re.IGNORECASE).strip()
-        m = re.match(r"^([A-Za-zÀ-ÖØ-öø-ÿ\s\-’']+)", parte)
-        if m:
-            c = m.group(1).strip()
-            if len(c) >= 2:
-                cn = smart_title_pt(c)
-                key = strip_accents(cn).lower()
-                return MUNICIPIOS_IDX.get(key, cn)
-
-    # Evita logradouros
-    if parece_logradouro(s):
-        return None
-
-    # Fallback: último município citado
-    s_key = strip_accents(s).lower()
-    ultimo = None; pos = -1
-    for key, nome_mun in MUNICIPIOS_IDX.items():
-        for m2 in re.finditer(rf"(?:^|\b|\s){re.escape(key)}(?:$|\b|\s|,|-|/)", s_key):
-            if m2.start() > pos:
-                pos = m2.start(); ultimo = nome_mun
-    return ultimo
-
-df["cidade"] = df["nome"].apply(extrair_cidade)
-df["cidade"] = df["cidade"].replace({
-    "Seropedica": "Seropédica",
-    "Armacao dos Buzios": "Armação dos Búzios",
-    "Niteroi": "Niterói",
-    "Sao Goncalo": "São Gonçalo",
-    "Rio De Janeiro": "Rio de Janeiro",
-})
-
-# ----------------------------------------
-# Título + Botão para limpar cache
-# ----------------------------------------
-st.title("📡 Endereços dos Sites RJ")
+    base = strip_accents(nome).lower()
+    ultimo = None
+   .title("📡 Endereços dos Sites RJ")
 
 if st.button("🔄 Atualizar dados (limpar cache)"):
     st.cache_data.clear()
     st.experimental_rerun()
 
-# ----------------------------------------
-# UI – Apenas busca por sigla
-# ----------------------------------------
-with st.form("form_sigla", clear_on_submit=False):
-    sigla_input_val = st.text_input("🔍 Buscar por sigla:", value=st.session_state.get("sigla_input", ""))
-    ok_busca = st.form_submit_button("OK")
-    if ok_busca:
-        st.session_state["sigla_commit"] = sigla_input_val
-        st.session_state["sigla_input"] = sigla_input_val
-sigla_filtro = st.session_state.get("sigla_commit", "")
+with st.form("form_sigla"):
+    sigla = st.text_input("🔍 Buscar por SIGLA:")
+    submitted = st.form_submit_button("OK")
 
-# ----------------------------------------
-# Aplicar filtro (somente por sigla)
-# ----------------------------------------
-df_filtrado = df.copy()
+if submitted:
+    st.session_state["sigla"] = sigla
+
+sigla_filtro = st.session_state.get("sigla", "")
+
+# ------------------------------------------------------------
+# Filtragem rápida
+# ------------------------------------------------------------
 if sigla_filtro:
-    df_filtrado = df_filtrado[df_filtrado["sigla"].astype(str).str.upper() == sigla_filtro.upper()]
-
-# ----------------------------------------
-# Técnicos da aba ACESSOS_OK
-# ----------------------------------------
-def tecnicos_por_sigla(sigla: str) -> list[str]:
-    if ACESSOS_OK is None or ACESSOS_OK.empty:
-        return []
-    m = ACESSOS_OK[ACESSOS_OK["sigla"].str.upper() == str(sigla).upper()]
-    nomes = m["tecnico"].dropna().unique().tolist()
-    nomes = [n.strip() for n in nomes if isinstance(n, str) and n.strip()]
-    return sorted(set(nomes))
-
-# ----------------------------------------
-# Resultados
-# ----------------------------------------
-if df_filtrado.empty:
-    st.warning("⚠️ Nenhum site encontrado com os filtros selecionados.")
+    df_f = df[df["sigla"].str.upper() == sigla_filtro.upper()]
 else:
-    st.success(f"🔎 {len(df_filtrado)} Site(s) encontrado(s).")
+    df_f = pd.DataFrame()
+
+# ------------------------------------------------------------
+# Exibir resultados
+# ------------------------------------------------------------
+if df_f.empty:
+    st.warning("⚠️ Nenhum site encontrado.")
+else:
+    # Cidade calculada somente aqui — econômico
+    df_f["cidade"] = df_f["nome"].apply(detectar_cidade)
+
+    st.success(f"🔎 {len(df_f)} site(s) encontrado(s).")
 
     st.dataframe(
-        df_filtrado[["sigla", "cidade", "detentora", "nome", "endereco", "lat", "lon"]],
+        df_f[["sigla", "cidade", "detentora", "nome", "endereco", "lat", "lon"]],
         use_container_width=True
     )
 
-    st.markdown("### 📍 Detalhes dos sites encontrados")
+    st.markdown("### 📍 Detalhes")
 
-    for _, row in df_filtrado.iterrows():
-        maps_url = f"https://www.google.com/maps/search/?api=1&query={row['lat']},{row['lon']}"
+    def tecnicos(sigla):
+        if ACESSOS_OK is None:
+            return []
+        temp = ACESSOS_OK[ACESSOS_OK["sigla"].str.upper() == sigla.upper()]
+        return sorted(temp["tecnico"].dropna().unique().tolist())
 
-        det = row.get("detentora")
-        det_fmt = det if (isinstance(det, str) and det.strip()) else "—"
-
-        tecnicos_md = ""
-        if det_fmt != "—":  # mostra técnicos somente quando houver detentora
-            nomes = tecnicos_por_sigla(row["sigla"])
-            tecnicos_md = "  \n**👤 Técnicos com acesso liberado:**  \n" + (
-                "  \n".join(f"- {t}" for t in nomes) if nomes else "—"
-            )
+    for _, row in df_f.iterrows():
+        det = row["detentora"] if pd.notna(row["detentora"]) else "—"
+        tecs = tecnicos(row["sigla"])
 
         st.markdown(
-            f"**{row['sigla']} - {row['nome']}**  \n"
-            f"🏙️ **Cidade:** {row.get('cidade') or '—'}  \n"
-            f"🏢 **Detentora:** {det_fmt}{tecnicos_md}  \n"
-            f"📌 **Endereço:** {row['endereco']}"
+            f"**{row['sigla']} — {row['nome']}**  \n"
+            f"🏙️ Cidade: {row['cidade'] or '—'}  \n"
+            f"🏢 Detentora: {det}  \n"
+            f"👤 Técnicos: {', '.join(tecs) if tecs else '—'}  \n"
+            f"📌 Endereço: {row['endereco']}"
         )
-        st.link_button("🗺️ Ver no Google Maps", maps_url, type="primary")
+
+        if row["lat"] and row["lon"]:
+            url = f"https://www.google.com/maps/search/?api=1&query={row['lat']},{row['lon']}"
+            st.link_button("🗺️ Ver no Google Maps", url, type="primary")
+
         st.markdown("---")
 
-st.caption("Dev Raphael Robles - Streamlit • Data ")
+st.caption("Feito com ❤️ em Streamlit — Dev Raphael Robles.")
+``
+
 
 
 
