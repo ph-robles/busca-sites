@@ -104,7 +104,7 @@ def carregar_acessos_ok():
     def norm(x):
         return strip_accents(str(x)).lower()
 
-   Campos dos Goytacazes", "Cantagalo", "Carapebus",
+   "Campos dos Goytacazes", "Cantagalo", "Carapebus",
     "Cardoso Moreira", "Carmo", "Casimiro de Abreu", "Conceição de Macabu",
     "Cordeiro", "Duas Barras", "Duque de Caxias", "Engenheiro Paulo de Frontin",
     " Sul", "Parati", "Paty do Alferes",
@@ -190,6 +190,7 @@ else:
 
 
 st.caption("Feito com ❤️ em Streamlit — Dev Raphael Robles 🚀")
+
 
 
 
