@@ -233,7 +233,8 @@ else:
 
 
 
-st.caption("Feito com ❤️ em Streamlit — Dev Raphael Robles 🚀")
+st.caption("❤️ Desenvolvido por Raphael Robles - Stay hungry, stay foolish ! 🚀")
+
 
 
 
