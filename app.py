@@ -1,5 +1,3 @@
-
-
 # ============================================================
 # 📡 Endereços dos Sites RJ — Google Geocoding + Distance Matrix + Cache
 # - Mantém todo o comportamento atual
@@ -269,9 +267,17 @@ ACESSOS_OK = carregar_acessos_ok()
 # ------------------------------------------------------------
 st.title("📡 Endereços dos Sites RJ")
 
+
+def _rerun():
+    if hasattr(st, "rerun"):
+        st.rerun()
+    else:
+        st.experimental_rerun()
+
 if st.button("🔄 Atualizar dados (limpar cache)"):
     st.cache_data.clear()
-    st.experimental_rerun()
+    _rerun()
+
 
 # -------------------- BUSCA POR SIGLA (existente) --------------------
 with st.form("form_sigla", clear_on_submit=False):
@@ -419,6 +425,7 @@ else:
         st.markdown("---")
 
 st.caption("❤️ Desenvolvido por Raphael Robles - Stay hungry, stay foolish ! 🚀")
+
 
 
 
