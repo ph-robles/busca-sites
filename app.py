@@ -1,8 +1,11 @@
 
+
 # ============================================================
 # 📡 Endereços dos Sites RJ — OSM/OSRM Edition (100% gratuito)
 # - Geocoding: Geoapify (opcional, com key) → fallback Nominatim (sem key)
 # - Rotas/Matriz: OSRM (sem key) para distância/tempo por trajeto
+# - Detecção de cidade aprimorada (regex + fallback no endereço)
+# - Geocodificação robusta: normalização de entrada + duas tentativas no Nominatim
 # - Sem mensagens/diagnóstico na UI
 # - Corrige pd.NA em f-strings (sem usar `or` com pd.NA)
 # - Mantém toda a lógica de SIGLA e Acessos OK
@@ -15,6 +18,7 @@ import time
 import requests
 import numpy as np
 import math
+import re
 from typing import List, Tuple
 
 # ------------------------------------------------------------
@@ -71,8 +75,73 @@ def fmt_na(x, dash="—"):
 RJ_VIEWBOX = (-43.8, -23.1, -43.0, -22.7)  # melhora match no RJ
 
 # ------------------------------------------------------------
-# Geocoding — GEOAPIFY (opcional, com key) + NOMINATIM (fallback)
+# Lista de municípios (RJ) + regex para melhor detecção
 # ------------------------------------------------------------
+MUNICIPIOS_RJ = [
+    "Angra dos Reis", "Aperibé", "Araruama", "Areal", "Armação dos Búzios", "Arraial do Cabo",
+    "Barra do Piraí", "Barra Mansa", "Belford Roxo", "Bom Jardim", "Bom Jesus do Itabapoana",
+    "Cabo Frio", "Cachoeiras de Macacu", "Cambuci", "Campos dos Goytacazes", "Cantagalo",
+    "Carapebus", "Cardoso Moreira", "Carmo", "Casimiro de Abreu", "Conceição de Macabu",
+    "Cordeiro", "Duas Barras", "Duque de Caxias", "Engenheiro Paulo de Frontin", "Guapimirim",
+    "Iguaba Grande", "Itaboraí", "Itaguaí", "Italva", "Itaocara", "Itaperuna", "Itatiaia",
+    "Japeri", "Laje do Muriaé", "Macaé", "Macuco", "Magé", "Mangaratiba", "Maricá", "Mendes",
+    "Mesquita", "Miguel Pereira", "Miracema", "Natividade", "Nilópolis", "Niterói",
+    "Nova Friburgo", "Nova Iguaçu", "Paracambi", "Paraíba do Sul", "Parati", "Paty do Alferes",
+    "Petrópolis", "Pinheiral", "Piraí", "Porciúncula", "Porto Real", "Quatis", "Queimados",
+    "Quissamã", "Resende", "Rio Bonito", "Rio Claro", "Rio das Flores", "Rio das Ostras",
+    "Rio de Janeiro", "Santa Maria Madalena", "Santo Antônio de Pádua", "São Fidélis",
+    "São Francisco de Itabapoana", "São Gonçalo", "São João da Barra", "São João de Meriti",
+    "São José de Ubá", "São José do Vale do Rio Preto", "São Pedro da Aldeia",
+    "São Sebastião do Alto", "Sapucaia", "Saquarema", "Seropédica", "Silva Jardim",
+    "Sumidouro", "Tanguá", "Teresópolis", "Trajano de Moraes", "Três Rios", "Valença",
+    "Varre-Sai", "Vassouras", "Volta Redonda"
+]
+MUNI_IDX = {strip_accents(n).lower(): n for n in MUNICIPIOS_RJ}
+_CITY_PATTERNS = {key: re.compile(rf"\b{re.escape(key)}\b") for key in MUNI_IDX.keys()}
+
+def _match_city_base(texto: str) -> str | None:
+    """Tenta casar município num texto (normalizado sem acentos e lower)."""
+    if not isinstance(texto, str) or not texto.strip():
+        return None
+    base = strip_accents(texto).lower()
+    ultimo = None
+    for key, pat in _CITY_PATTERNS.items():
+        if pat.search(base):
+            ultimo = MUNI_IDX[key]
+    return ultimo
+
+def detectar_cidade(nome: str, endereco: str | None = None) -> str | None:
+    """
+    1) Tenta identificar o município no 'nome'
+    2) Se não achou, tenta no 'endereco'
+    """
+    city = _match_city_base(nome)
+    if city:
+        return city
+    if endereco:
+        return _match_city_base(endereco)
+    return None
+
+# ------------------------------------------------------------
+# Geocoding — normalização do endereço + Geoapify (opcional) + Nominatim (duas tentativas)
+# ------------------------------------------------------------
+def _normalize_address_for_br(addr: str) -> str:
+    """
+    Se o usuário digitar algo muito curto/sem país/UF, acrescenta 'RJ, Brasil' ou 'Brasil'.
+    - Se já houver 'RJ'/'Brasil', mantém.
+    """
+    if not isinstance(addr, str):
+        return addr
+    a = addr.strip()
+    a_low = strip_accents(a).lower()
+    if (" rj" in a_low) or (" rio de janeiro" in a_low) or (" brasil" in a_low) or (" brazil" in a_low):
+        return a
+    # heurística simples: se só tem 1 parte (sem vírgula), completar com RJ e Brasil
+    if len(a.split(",")) == 1:
+        return f"{a}, RJ, Brasil"
+    # senão, ao menos assegura Brasil
+    return f"{a}, Brasil"
+
 @st.cache_data(show_spinner=False, ttl=60*60)
 def geocode_geoapify(address: str):
     """
@@ -119,32 +188,34 @@ def geocode_geoapify(address: str):
         return None, dbg
 
 @st.cache_data(show_spinner=False, ttl=60*60)
-def geocode_nominatim(address: str):
+def geocode_nominatim(address: str, strict_rj: bool = True):
     """
-    Fallback leve usando Nominatim (OSM), sem chave.
+    Nominatim (OSM) com duas modalidades:
+      - strict_rj=True  -> usa viewbox do RJ (bounded=1)
+      - strict_rj=False -> remove bounded e busca no Brasil todo
     Retorna (result, dbg).
     """
     dbg = {"provider": "nominatim", "status": None, "error_message": None, "raw_sample": None}
+    address = _normalize_address_for_br(address)
     if not address or not address.strip():
         dbg["status"] = "MISSING_ADDRESS"
         return None, dbg
     try:
         time.sleep(1.0)  # respeita limites do serviço público
-        r = requests.get(
-            "https://nominatim.openstreetmap.org/search",
-            params={
-                "q": address,
-                "format": "json",
-                "limit": 1,
-                "countrycodes": "br",
-                "accept-language": "pt-BR",
-                # viés RJ
+        params = {
+            "q": address,
+            "format": "json",
+            "limit": 1,
+            "countrycodes": "br",
+            "accept-language": "pt-BR",
+        }
+        headers = {"User-Agent": "busca-sites-b2b/1.0 (contato: seu-email@exemplo.com)"}
+        if strict_rj:
+            params.update({
                 "viewbox": f"{RJ_VIEWBOX[0]},{RJ_VIEWBOX[1]},{RJ_VIEWBOX[2]},{RJ_VIEWBOX[3]}",
                 "bounded": 1
-            },
-            headers={"User-Agent": "busca-sites-b2b/1.0 (contato: seu-email@exemplo.com)"},
-            timeout=10
-        )
+            })
+        r = requests.get("https://nominatim.openstreetmap.org/search", params=params, headers=headers, timeout=10)
         j = r.json()
         if j:
             item = j[0]
@@ -168,21 +239,26 @@ def geocode_nominatim(address: str):
 
 def geocode_address(address: str):
     """
-    Orquestra geocoding: tenta Geoapify (se key), senão Nominatim.
-    Se Geoapify falhar, tenta Nominatim automaticamente.
-    Retorna (result, dbg)
+    Ordem:
+      1) Geoapify (se key)
+      2) Nominatim com viés RJ estrito
+      3) Nominatim sem bounded (apenas BR)
     """
+    # 1) Geoapify
     if GEOAPIFY_KEY:
         res, dbg = geocode_geoapify(address)
         if res:
             return res, dbg
-        # Tentar fallback Nominatim se Geoapify não retornar OK
-        res2, dbg2 = geocode_nominatim(address)
-        if res2:
-            return res2, dbg2
-        return None, {"provider": "none", "status": f"geoapify_{dbg.get('status')}_and_osm_{dbg2.get('status')}", "error_message": dbg.get("error_message") or dbg2.get("error_message")}
-    else:
-        return geocode_nominatim(address)
+    # 2) Nominatim com RJ estrito
+    res2, dbg2 = geocode_nominatim(address, strict_rj=True)
+    if res2:
+        return res2, dbg2
+    # 3) Nominatim sem bounded (Brasil inteiro)
+    res3, dbg3 = geocode_nominatim(address, strict_rj=False)
+    if res3:
+        return res3, dbg3
+    # nada encontrado
+    return None, {"provider": "none", "status": "ZERO_RESULTS", "error_message": None}
 
 # ------------------------------------------------------------
 # Rotas/Matriz — OSRM (sem key)
@@ -328,40 +404,6 @@ def carregar_acessos_ok():
     return acc.reset_index(drop=True)
 
 # ------------------------------------------------------------
-# Detectar cidade (leve) a partir do nome
-# ------------------------------------------------------------
-MUNICIPIOS_RJ = [
-    "Angra dos Reis", "Aperibé", "Araruama", "Areal", "Armação dos Búzios", "Arraial do Cabo",
-    "Barra do Piraí", "Barra Mansa", "Belford Roxo", "Bom Jardim", "Bom Jesus do Itabapoana",
-    "Cabo Frio", "Cachoeiras de Macacu", "Cambuci", "Campos dos Goytacazes", "Cantagalo",
-    "Carapebus", "Cardoso Moreira", "Carmo", "Casimiro de Abreu", "Conceição de Macabu",
-    "Cordeiro", "Duas Barras", "Duque de Caxias", "Engenheiro Paulo de Frontin", "Guapimirim",
-    "Iguaba Grande", "Itaboraí", "Itaguaí", "Italva", "Itaocara", "Itaperuna", "Itatiaia",
-    "Japeri", "Laje do Muriaé", "Macaé", "Macuco", "Magé", "Mangaratiba", "Maricá", "Mendes",
-    "Mesquita", "Miguel Pereira", "Miracema", "Natividade", "Nilópolis", "Niterói",
-    "Nova Friburgo", "Nova Iguaçu", "Paracambi", "Paraíba do Sul", "Parati", "Paty do Alferes",
-    "Petrópolis", "Pinheiral", "Piraí", "Porciúncula", "Porto Real", "Quatis", "Queimados",
-    "Quissamã", "Resende", "Rio Bonito", "Rio Claro", "Rio das Flores", "Rio das Ostras",
-    "Rio de Janeiro", "Santa Maria Madalena", "Santo Antônio de Pádua", "São Fidélis",
-    "São Francisco de Itabapoana", "São Gonçalo", "São João da Barra", "São João de Meriti",
-    "São José de Ubá", "São José do Vale do Rio Preto", "São Pedro da Aldeia",
-    "São Sebastião do Alto", "Sapucaia", "Saquarema", "Seropédica", "Silva Jardim",
-    "Sumidouro", "Tanguá", "Teresópolis", "Trajano de Moraes", "Três Rios", "Valença",
-    "Varre-Sai", "Vassouras", "Volta Redonda"
-]
-MUNI_IDX = {strip_accents(n).lower(): n for n in MUNICIPIOS_RJ}
-
-def detectar_cidade(nome: str):
-    if not isinstance(nome, str):
-        return None
-    base = strip_accents(nome).lower()
-    ultimo = None
-    for key, city in MUNI_IDX.items():
-        if key in base:
-            ultimo = city
-    return ultimo
-
-# ------------------------------------------------------------
 # Carregar bases
 # ------------------------------------------------------------
 df = carregar_dados()
@@ -388,13 +430,13 @@ sigla_filtro = st.session_state.get("sigla", "")
 
 # -------------------- BUSCA POR ENDEREÇO (sem diagnóstico) ----------
 st.markdown("---")
-st.subheader("🧭 Buscar por ENDEREÇO do cliente → 3 sites mais próximos")
+st.subheader("🧭 Buscar por ENDEREÇO do cliente → 3 ERBs mais próximas")
 
 with st.form("form_endereco", clear_on_submit=False):
     endereco_cliente = st.text_input(
-        "Digite o endereço completo (rua, número, bairro, cidade)"
+        "Digite o endereço completo (rua, número, bairro, cidade — RJ de preferência)"
     )
-    submitted_endereco = st.form_submit_button("Buscar sites")
+    submitted_endereco = st.form_submit_button("Buscar ERBs")
 
 if submitted_endereco:
     st.session_state["endereco_cliente"] = endereco_cliente
@@ -419,7 +461,7 @@ if endereco_filtro:
         # Filtra ERBs com coordenadas válidas
         base = df.dropna(subset=["lat", "lon"]).copy()
         if base.empty:
-            st.warning("⚠️ Nenhum site na planilha possui coordenadas válidas.")
+            st.warning("⚠️ Nenhuma ERB na planilha possui coordenadas válidas.")
         else:
             base["dist_km_linear"] = haversine_km(lat_cli, lon_cli, base["lat"].values, base["lon"].values)
             top3 = base.nsmallest(3, "dist_km_linear").copy()
@@ -441,7 +483,7 @@ if endereco_filtro:
                 top3["duracao_text"]    = pd.NA
                 top3["duracao_s"]       = pd.NA
 
-            st.markdown("### 📍 3 sites mais próximos")
+            st.markdown("### 📍 3 ERBs mais próximas (linha reta; rota quando disponível)")
             mostrar_cols = [c for c in [
                 "sigla", "nome", "detentora", "endereco", "lat", "lon",
                 "dist_km_linear", "dist_rodov_text", "duracao_text"
@@ -470,7 +512,7 @@ if endereco_filtro:
                 st.markdown(title + "  \n" + meta)
                 cols = st.columns(2)
                 with cols[0]:
-                    st.link_button("🗺️ Ver no Google Maps", maps_erb, type="primary")
+                    st.link_button("🗺️ Ver ERB no Google Maps", maps_erb, type="primary")
                 with cols[1]:
                     st.link_button("🚗 Traçar rota a partir do cliente", rota)
                 st.markdown("---")
@@ -486,7 +528,8 @@ else:
 if df_f.empty:
     st.warning("⚠️ Nenhum site encontrado.")
 else:
-    df_f["cidade"] = df_f["nome"].apply(detectar_cidade)
+    # Detecção de cidade aprimorada: tenta no 'nome' e, se não, no 'endereco'
+    df_f["cidade"] = df_f.apply(lambda r: detectar_cidade(r.get("nome"), r.get("endereco")), axis=1)
 
     st.success(f"🔎 {len(df_f)} site(s) encontrado(s).")
 
@@ -524,6 +567,8 @@ else:
         st.markdown("---")
 
 st.caption("❤️ Desenvolvido por Raphael Robles - Stay hungry, stay foolish ! 🚀")
+
+
 
 
 
