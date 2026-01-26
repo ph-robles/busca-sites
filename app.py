@@ -1,9 +1,8 @@
-
 # ============================================================
 # 📡 Endereços dos Sites RJ — OSM/OSRM Edition (100% gratuito)
 # - Geocoding: Geoapify (opcional, com key) → fallback Nominatim (sem key)
 # - Rotas/Matriz: OSRM (sem key) para distância/tempo por trajeto
-# - Diagnóstico ativável (geocoding e rotas)
+# - Sem checkboxes/diagnóstico na UI (limpo)
 # - Corrige pd.NA em f-strings (sem usar `or` com pd.NA)
 # - Mantém toda a lógica de SIGLA e Acessos OK
 # ============================================================
@@ -15,7 +14,7 @@ import time
 import requests
 import numpy as np
 import math
-from typing import List, Tuple, Optional
+from typing import List, Tuple
 
 # ------------------------------------------------------------
 # Config
@@ -58,7 +57,7 @@ def haversine_km(lat1, lon1, lat2, lon2):
     return R * c
 
 def fmt_na(x, dash="—"):
-    """Substitui pd.NA/NaN/None por '—' evitando TypeError de truthiness."""
+    """Substitui pd.NA/NaN/None por '—' evitando TypeError de truthiness com pd.NA."""
     try:
         return dash if (x is pd.NA or pd.isna(x)) else x
     except Exception:
@@ -391,7 +390,7 @@ if submitted:
 
 sigla_filtro = st.session_state.get("sigla", "")
 
-# -------------------- BUSCA POR ENDEREÇO (NOVO) ---------------------
+# -------------------- BUSCA POR ENDEREÇO (sem diagnóstico) ----------
 st.markdown("---")
 st.subheader("🧭 Buscar por ENDEREÇO do cliente → 3 ERBs mais próximas")
 
@@ -399,40 +398,23 @@ with st.form("form_endereco", clear_on_submit=False):
     endereco_cliente = st.text_input(
         "Digite o endereço completo (rua, número, bairro, cidade — RJ de preferência)"
     )
-    diag_geo = st.checkbox("Mostrar diagnóstico de Geocoding (temporário)", value=False)
-    diag_osrm = st.checkbox("Mostrar diagnóstico de Rotas (temporário)", value=False)
     submitted_endereco = st.form_submit_button("Buscar ERBs")
 
 if submitted_endereco:
     st.session_state["endereco_cliente"] = endereco_cliente
-    st.session_state["diag_geo"] = diag_geo
-    st.session_state["diag_osrm"] = diag_osrm
 
 endereco_filtro = st.session_state.get("endereco_cliente", "")
-diag_geo = st.session_state.get("diag_geo", False)
-diag_osrm = st.session_state.get("diag_osrm", False)
 
 if endereco_filtro:
     with st.spinner("Geocodificando endereço e calculando distâncias..."):
-        geo, dbg_geo = geocode_address(endereco_filtro)
-
-    # Diagnóstico geocoding
-    if diag_geo:
-        st.code(
-            f"[Geocoding] Provider: {dbg_geo.get('provider')} | "
-            f"Status: {dbg_geo.get('status')} | "
-            f"Erro: {dbg_geo.get('error_message')} | "
-            f"Amostra: {dbg_geo.get('raw_sample')}",
-            language="text"
-        )
+        geo, _ = geocode_address(endereco_filtro)
 
     if not geo:
         st.error("❌ Endereço não encontrado. Tente incluir número/bairro/cidade. "
                  "Se persistir, refine o endereço ou tente outro próximo.")
     else:
         lat_cli, lon_cli = geo["lat"], geo["lon"]
-        prov = dbg_geo.get("provider", "geoapify")
-        st.success(f"✅ Endereço localizado ({'Geoapify' if prov=='geoapify' else 'OSM/Nominatim'}):")
+        st.success("✅ Endereço localizado:")
         st.markdown(
             f"**{geo['formatted']}**  \n"
             f"🧭 **Coordenadas**: {lat_cli:.6f}, {lon_cli:.6f}"
@@ -452,22 +434,16 @@ if endereco_filtro:
                 [(float(r["lat"]), float(r["lon"])) for _, r in top3.iterrows()]
             )
 
-            if dm_out and len(dm_out) == len(top3):
+            if dm_out and len(dm_out) == len(top3) and (dm_dbg.get("status") in ("Ok", "OK", None)):
                 top3 = top3.reset_index(drop=True)
                 top3["dist_rodov_text"] = [x["distance_text"] for x in dm_out]
                 top3["duracao_text"]    = [x["duration_text"] for x in dm_out]
                 top3["duracao_s"]       = [x["duration_s"] for x in dm_out]
             else:
+                # Mantém a UI estável mesmo se OSRM falhar
                 top3["dist_rodov_text"] = pd.NA
                 top3["duracao_text"]    = pd.NA
                 top3["duracao_s"]       = pd.NA
-
-            # Diagnóstico OSRM (opcional)
-            if diag_osrm and dm_dbg:
-                st.code(
-                    f"[OSRM] Status: {dm_dbg.get('status')} | Erro: {dm_dbg.get('error_message')}",
-                    language="text"
-                )
 
             st.markdown("### 📍 3 ERBs mais próximas (linha reta; rota quando disponível)")
             mostrar_cols = [c for c in [
@@ -552,6 +528,8 @@ else:
         st.markdown("---")
 
 st.caption("❤️ Desenvolvido por Raphael Robles - Stay hungry, stay foolish ! 🚀")
+
+
 
 
 
