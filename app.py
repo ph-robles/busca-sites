@@ -1,19 +1,16 @@
 
-# ==========================================================
-# 📡 Endereços dos Sites RJ — Versão OTIMIZADA e ESTÁVEL (+ busca por endereço)
-# - Lê aba "enderecos" com colunas reais da sua planilha
-# - Busca por SIGLA (como antes)
-# - Técnicos (aba "acessos") com status ok (como antes)
-# - Link para Google Maps logo abaixo do título do site (como antes)
-# - Técnicos em caixa de destaque (st.info), um por linha (como antes)
-# - NOVO: Caixa de busca por ENDEREÇO → 3 ERBs mais próximas (Haversine)
-# - Sem filtros extras e sem diagnóstico
+
+# ============================================================
+# 📡 Endereços dos Sites RJ — Google Geocoding + Distance Matrix + Cache
+# - Mantém todo o comportamento atual
+# - Substitui Nominatim por Google Geocoding API
+# - Adiciona tempo/distância por rota (Distance Matrix API)
+# - Cache para reduzir custos e latência
 # ============================================================
 
 import streamlit as st
 import pandas as pd
 import unicodedata
-import math
 import time
 import requests
 import numpy as np
@@ -24,6 +21,17 @@ import numpy as np
 st.set_page_config(page_title="Endereços dos Sites RJ", page_icon="📡", layout="wide")
 
 # ------------------------------------------------------------
+# Secrets / Chave da Google
+# ------------------------------------------------------------
+API_KEY = st.secrets.get("GOOGLE_MAPS_API_KEY", "").strip()
+
+if not API_KEY:
+    st.warning(
+        "⚠️ Configure sua chave em Settings → Secrets como `GOOGLE_MAPS_API_KEY`. "
+        "Enquanto isso, a busca por endereço/rota ficará indisponível."
+    )
+
+# ------------------------------------------------------------
 # Auxiliares
 # ------------------------------------------------------------
 def strip_accents(s: str):
@@ -32,9 +40,7 @@ def strip_accents(s: str):
     return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
 
 def haversine_km(lat1, lon1, lat2, lon2):
-    """
-    Distância Haversine em km entre dois pontos (pode receber arrays para lat2/lon2).
-    """
+    """Distância Haversine em km (aceita arrays em lat2/lon2)."""
     R = 6371.0088
     lat1 = np.radians(lat1)
     lon1 = np.radians(lon1)
@@ -47,52 +53,93 @@ def haversine_km(lat1, lon1, lat2, lon2):
     return R * c
 
 # ------------------------------------------------------------
-# Geocodificação (Nominatim / OpenStreetMap)
+# GOOGLE GEOCODING API (Endereço -> Coordenadas)
 # ------------------------------------------------------------
-# Bounding box aproximado do RJ para "puxar" resultados corretos:
-RJ_VIEWBOX = (-43.8, -23.1, -43.0, -22.7)  # (min_lon, min_lat, max_lon, max_lat)
-
-@st.cache_data(show_spinner=False, ttl=3600)  # cacheia por 1h
-def geocode_nominatim(address: str):
+@st.cache_data(show_spinner=False, ttl=60*60)  # 1h de cache por endereço
+def geocode_google(address: str):
     """
-    Geocodifica um endereço com Nominatim (OpenStreetMap) e viés BR/RJ.
-    Retorna dict {lat, lon, display_name} ou None se não achar.
+    Retorna: {'lat': float, 'lon': float, 'formatted': str} ou None
+    Usa Geocoding API (Google).
     """
-    if not address or not address.strip():
+    if not API_KEY or not address or not address.strip():
         return None
-
-    url = "https://nominatim.openstreetmap.org/search"
+    url = "https://maps.googleapis.com/maps/api/geocode/json"
     params = {
-        "q": address,
-        "format": "json",
-        "limit": 1,
-        "addressdetails": 0,
-        "countrycodes": "br",
-        "accept-language": "pt-BR",
-        # viés RJ
-        "viewbox": f"{RJ_VIEWBOX[0]},{RJ_VIEWBOX[1]},{RJ_VIEWBOX[2]},{RJ_VIEWBOX[3]}",
-        "bounded": 1,
-    }
-    headers = {
-        # Defina um user-agent identificável (idealmente com seu e-mail/site de contato).
-        "User-Agent": "busca-sites-b2b/1.0 (contato: raphael@exemplo.com)"
+        "address": address,
+        "region": "br",        # favorece resultados no Brasil
+        "language": "pt-BR",   # nomes em pt-BR quando possível
+        "key": API_KEY
     }
     try:
-        # Respeito básico à política de uso (evita flood)
-        time.sleep(1.0)
-        r = requests.get(url, params=params, headers=headers, timeout=10)
+        r = requests.get(url, params=params, timeout=10)
         r.raise_for_status()
         data = r.json()
-        if not data:
+        if data.get("status") != "OK" or not data.get("results"):
             return None
-        item = data[0]
+        res = data["results"][0]
+        loc = res["geometry"]["location"]
         return {
-            "lat": float(item["lat"]),
-            "lon": float(item["lon"]),
-            "display_name": item.get("display_name", address),
+            "lat": float(loc["lat"]),
+            "lon": float(loc["lng"]),
+            "formatted": res.get("formatted_address") or address
         }
     except Exception:
         return None
+
+# ------------------------------------------------------------
+# GOOGLE DISTANCE MATRIX (origem -> destinos) por carro
+# ------------------------------------------------------------
+@st.cache_data(show_spinner=False, ttl=15*60)  # 15 min de cache por conjunto origem/destinos
+def distance_matrix_google(origin_lat, origin_lon, dests, mode="driving"):
+    """
+    Calcula tempo/distância dirigindo entre origem e destinos.
+    dests: lista de tuplas (lat, lon)
+    Retorna lista de dicts com 'distance_m', 'distance_text', 'duration_s', 'duration_text'
+    na mesma ordem de dests. Se falhar, retorna lista vazia.
+    """
+    if not API_KEY or not dests:
+        return []
+
+    origins = f"{origin_lat},{origin_lon}"
+    destinations = "|".join([f"{lat},{lon}" for (lat, lon) in dests])
+
+    url = "https://maps.googleapis.com/maps/api/distancematrix/json"
+    params = {
+        "origins": origins,
+        "destinations": destinations,
+        "mode": mode,
+        "language": "pt-BR",
+        "key": API_KEY
+    }
+    try:
+        r = requests.get(url, params=params, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        if data.get("status") != "OK":
+            return []
+
+        rows = data.get("rows", [])
+        if not rows:
+            return []
+
+        elements = rows[0].get("elements", [])
+        out = []
+        for el in elements:
+            if el.get("status") == "OK":
+                out.append({
+                    "distance_m": el["distance"]["value"],
+                    "distance_text": el["distance"]["text"],
+                    "duration_s": el["duration"]["value"],
+                    "duration_text": el["duration"]["text"],
+                })
+            else:
+                out.append({
+                    "distance_m": None, "distance_text": None,
+                    "duration_s": None, "duration_text": None
+                })
+        return out
+    except Exception:
+        return []
 
 # ------------------------------------------------------------
 # Dados principais (aba: enderecos)
@@ -202,10 +249,6 @@ MUNICIPIOS_RJ = [
 MUNI_IDX = {strip_accents(n).lower(): n for n in MUNICIPIOS_RJ}
 
 def detectar_cidade(nome: str):
-    """
-    Detecção simples por substring: procura o último município mencionado no campo 'nome'.
-    É chamada apenas após filtrar por SIGLA (1 ou poucas linhas), então é leve.
-    """
     if not isinstance(nome, str):
         return None
     base = strip_accents(nome).lower()
@@ -240,69 +283,92 @@ if submitted:
 
 sigla_filtro = st.session_state.get("sigla", "")
 
-# -------------------- NOVO: BUSCA POR ENDEREÇO -----------------------
+# -------------------- NOVO: BUSCA POR ENDEREÇO (Google) -------------
 st.markdown("---")
-st.subheader("🧭 Buscar por ENDEREÇO do cliente → 3 Sites mais próximas")
+st.subheader("🧭 Buscar por ENDEREÇO do cliente → 3 ERBs mais próximas")
 
 with st.form("form_endereco", clear_on_submit=False):
     endereco_cliente = st.text_input(
-        "Digite o endereço completo (rua, número, bairro, cidade)"
+        "Digite o endereço completo (rua, número, bairro, cidade — RJ de preferência)"
     )
-    submitted_endereco = st.form_submit_button("Buscar Sites")
+    submitted_endereco = st.form_submit_button("Buscar ERBs")
 
 if submitted_endereco:
     st.session_state["endereco_cliente"] = endereco_cliente
 
 endereco_filtro = st.session_state.get("endereco_cliente", "")
 
-# Quando houver endereço, geocodificar e calcular top-3
 if endereco_filtro:
-    with st.spinner("Geocodificando endereço e calculando distâncias..."):
-        geo = geocode_nominatim(endereco_filtro)
-
-    if not geo:
-        st.error("❌ Endereço não encontrado. Tente ser mais específico (ex.: número, bairro, cidade).")
+    if not API_KEY:
+        st.error("❌ Falta configurar `GOOGLE_MAPS_API_KEY` em Secrets para usar a busca por endereço.")
     else:
-        lat_cli, lon_cli = geo["lat"], geo["lon"]
-        st.success("✅ Endereço localizado:")
-        st.markdown(
-            f"**{geo['display_name']}**  \n"
-            f"🧭 **Coordenadas**: {lat_cli:.6f}, {lon_cli:.6f}"
-        )
+        with st.spinner("Geocodificando endereço (Google) e calculando distâncias..."):
+            geo = geocode_google(endereco_filtro)
 
-        # Filtra apenas linhas com coordenadas válidas
-        base = df.dropna(subset=["lat", "lon"]).copy()
-        if base.empty:
-            st.warning("⚠️ Nenhum Site na planilha possui coordenadas válidas.")
+        if not geo:
+            st.error("❌ Endereço não encontrado. Tente ser mais específico (número/bairro/cidade).")
         else:
-            # Distâncias com Haversine (vetorizado)
-            base["dist_km"] = haversine_km(lat_cli, lon_cli, base["lat"].values, base["lon"].values)
-            top3 = base.nsmallest(3, "dist_km").copy()
-
-            st.markdown("### 📍 3 sites mais próximas do cliente.")
-            mostrar_cols = [c for c in ["sigla", "nome", "detentora", "endereco", "lat", "lon", "dist_km"] if c in top3.columns]
-            st.dataframe(
-                top3[mostrar_cols].assign(dist_km=lambda d: d["dist_km"].round(3)),
-                use_container_width=True
+            lat_cli, lon_cli = geo["lat"], geo["lon"]
+            st.success("✅ Endereço localizado:")
+            st.markdown(
+                f"**{geo['formatted']}**  \n"
+                f"🧭 **Coordenadas**: {lat_cli:.6f}, {lon_cli:.6f}"
             )
 
-            # Cartões com links úteis (Mapa e Rota)
-            for i, row in top3.iterrows():
-                erb_lat, erb_lon = float(row["lat"]), float(row["lon"])
-                maps_erb = f"https://www.google.com/maps/search/?api=1&query={erb_lat},{erb_lon}"
-                rota = f"https://www.google.com/maps/dir/?api=1&origin={lat_cli},{lon_cli}&destination={erb_lat},{erb_lon}&travelmode=driving"
+            # Filtra apenas linhas com coordenadas válidas
+            base = df.dropna(subset=["lat", "lon"]).copy()
+            if base.empty:
+                st.warning("⚠️ Nenhuma ERB na planilha possui coordenadas válidas.")
+            else:
+                # Distância geodésica (linha reta) para ranking inicial
+                base["dist_km_linear"] = haversine_km(lat_cli, lon_cli, base["lat"].values, base["lon"].values)
+                top3 = base.nsmallest(3, "dist_km_linear").copy()
 
-                st.markdown(
-                    f"**{row.get('sigla', '—')} — {row.get('nome', '—')}**  \n"
-                    f"🗺️ Distância: **{row['dist_km']:.3f} km**  \n"
-                    f"📌 Coords: {erb_lat:.6f}, {erb_lon:.6f}"
+                # Chama Distance Matrix para tempo/distância por rota
+                destinos = [(float(r["lat"]), float(r["lon"])) for _, r in top3.iterrows()]
+                dm = distance_matrix_google(lat_cli, lon_cli, destinos, mode="driving")
+
+                # Anexa resultados (se disponíveis)
+                if dm and len(dm) == len(top3):
+                    top3 = top3.reset_index(drop=True)
+                    top3["dist_rodov_text"] = [x["distance_text"] for x in dm]
+                    top3["duracao_text"] = [x["duration_text"] for x in dm]
+                    top3["duracao_s"] = [x["duration_s"] for x in dm]
+                else:
+                    top3["dist_rodov_text"] = pd.NA
+                    top3["duracao_text"] = pd.NA
+                    top3["duracao_s"] = pd.NA
+
+                st.markdown("### 📍 3 ERBs mais próximas (ranking por linha reta, com rota quando disponível)")
+                mostrar_cols = [c for c in [
+                    "sigla", "nome", "detentora", "endereco", "lat", "lon",
+                    "dist_km_linear", "dist_rodov_text", "duracao_text"
+                ] if c in top3.columns]
+                st.dataframe(
+                    top3[mostrar_cols].assign(dist_km_linear=lambda d: d["dist_km_linear"].round(3)),
+                    use_container_width=True
                 )
-                cols = st.columns(2)
-                with cols[0]:
-                    st.link_button("🗺️ Ver ERB no Google Maps", maps_erb, type="primary")
-                with cols[1]:
-                    st.link_button("🚗 Traçar rota (origem = endereço do cliente)", rota)
-                st.markdown("---")
+
+                # Cartões com links (Mapa e Rota)
+                for _, row in top3.iterrows():
+                    erb_lat, erb_lon = float(row["lat"]), float(row["lon"])
+                    maps_erb = f"https://www.google.com/maps/search/?api=1&query={erb_lat},{erb_lon}"
+                    rota = f"https://www.google.com/maps/dir/?api=1&origin={lat_cli},{lon_cli}&destination={erb_lat},{erb_lon}&travelmode=driving"
+
+                    title = f"**{row.get('sigla', '—')} — {row.get('nome', '—')}**"
+                    meta = (
+                        f"🗺️ Linha reta: **{row['dist_km_linear']:.3f} km**  \n"
+                        f"🚗 Rota: {row.get('dist_rodov_text') or '—'}  \n"
+                        f"⏱️ Tempo: {row.get('duracao_text') or '—'}  \n"
+                        f"📌 Coords: {erb_lat:.6f}, {erb_lon:.6f}"
+                    )
+                    st.markdown(title + "  \n" + meta)
+                    cols = st.columns(2)
+                    with cols[0]:
+                        st.link_button("🗺️ Ver ERB no Google Maps", maps_erb, type="primary")
+                    with cols[1]:
+                        st.link_button("🚗 Traçar rota a partir do cliente", rota)
+                    st.markdown("---")
 
 st.markdown("---")
 
@@ -315,7 +381,6 @@ else:
 if df_f.empty:
     st.warning("⚠️ Nenhum site encontrado.")
 else:
-    # Detectar cidade apenas nas linhas filtradas (rápido)
     df_f["cidade"] = df_f["nome"].apply(detectar_cidade)
 
     st.success(f"🔎 {len(df_f)} site(s) encontrado(s).")
@@ -325,7 +390,6 @@ else:
         use_container_width=True
     )
 
-    # Título geral
     st.markdown("### 📍 Detalhes do(s) site(s) encontrado(s)")
 
     def tecnicos_por_sigla(sig: str):
@@ -335,15 +399,12 @@ else:
         return sorted(temp["tecnico"].dropna().unique().tolist())
 
     for _, row in df_f.iterrows():
-        # Título do site
         st.markdown(f"**{row['sigla']} — {row['nome']}**")
 
-        # Botão do Google Maps logo abaixo do título
         if pd.notna(row.get("lat")) and pd.notna(row.get("lon")):
             url = f"https://www.google.com/maps/search/?api=1&query={row['lat']},{row['lon']}"
             st.link_button("🗺️ Ver no Google Maps", url, type="primary")
 
-        # Campos do site
         det = row["detentora"] if pd.notna(row["detentora"]) else "—"
         st.markdown(
             f"🏙️ **Cidade:** {row.get('cidade') or '—'}  \n"
@@ -351,18 +412,14 @@ else:
             f"📌 **Endereço:** {row['endereco']}"
         )
 
-        # Técnicos em caixa de destaque, um por linha
         tecnicos = tecnicos_por_sigla(row["sigla"])
-        if tecnicos:
-            lista_md = "\n".join([f"- {t}" for t in tecnicos])
-        else:
-            lista_md = "—"
-
+        lista_md = "\n".join([f"- {t}" for t in tecnicos]) if tecnicos else "—"
         st.info(f"**👤 Técnicos com acesso liberado:**\n{lista_md}")
 
         st.markdown("---")
 
 st.caption("❤️ Desenvolvido por Raphael Robles - Stay hungry, stay foolish ! 🚀")
+
 
 
 
