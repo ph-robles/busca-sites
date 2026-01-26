@@ -242,13 +242,13 @@ sigla_filtro = st.session_state.get("sigla", "")
 
 # -------------------- NOVO: BUSCA POR ENDEREÇO -----------------------
 st.markdown("---")
-st.subheader("🧭 Buscar por ENDEREÇO do cliente → 3 ERBs mais próximas")
+st.subheader("🧭 Buscar por ENDEREÇO do cliente → 3 Sites mais próximas")
 
 with st.form("form_endereco", clear_on_submit=False):
     endereco_cliente = st.text_input(
-        "Digite o endereço completo (rua, número, bairro, cidade) — preferencialmente no RJ"
+        "Digite o endereço completo (rua, número, bairro, cidade)"
     )
-    submitted_endereco = st.form_submit_button("Buscar ERBs")
+    submitted_endereco = st.form_submit_button("Buscar Sites")
 
 if submitted_endereco:
     st.session_state["endereco_cliente"] = endereco_cliente
@@ -273,13 +273,13 @@ if endereco_filtro:
         # Filtra apenas linhas com coordenadas válidas
         base = df.dropna(subset=["lat", "lon"]).copy()
         if base.empty:
-            st.warning("⚠️ Nenhuma ERB na planilha possui coordenadas válidas.")
+            st.warning("⚠️ Nenhum Site na planilha possui coordenadas válidas.")
         else:
             # Distâncias com Haversine (vetorizado)
             base["dist_km"] = haversine_km(lat_cli, lon_cli, base["lat"].values, base["lon"].values)
             top3 = base.nsmallest(3, "dist_km").copy()
 
-            st.markdown("### 📍 3 ERBs mais próximas")
+            st.markdown("### 📍 3 sites mais próximas do cliente.")
             mostrar_cols = [c for c in ["sigla", "nome", "detentora", "endereco", "lat", "lon", "dist_km"] if c in top3.columns]
             st.dataframe(
                 top3[mostrar_cols].assign(dist_km=lambda d: d["dist_km"].round(3)),
@@ -363,6 +363,7 @@ else:
         st.markdown("---")
 
 st.caption("❤️ Desenvolvido por Raphael Robles - Stay hungry, stay foolish ! 🚀")
+
 
 
 
