@@ -1,16 +1,22 @@
-# ============================================================
-# 📡 Endereços dos Sites RJ — Versão OTIMIZADA e ESTÁVEL
+
+==========================================================
+# 📡 Endereços dos Sites RJ — Versão OTIMIZADA e ESTÁVEL (+ busca por endereço)
 # - Lê aba "enderecos" com colunas reais da sua planilha
-# - Busca por SIGLA
-# - Técnicos (aba "acessos") com status ok
-# - Link para Google Maps logo abaixo do título do site
-# - Técnicos em caixa de destaque (st.info), um por linha
+# - Busca por SIGLA (como antes)
+# - Técnicos (aba "acessos") com status ok (como antes)
+# - Link para Google Maps logo abaixo do título do site (como antes)
+# - Técnicos em caixa de destaque (st.info), um por linha (como antes)
+# - NOVO: Caixa de busca por ENDEREÇO → 3 ERBs mais próximas (Haversine)
 # - Sem filtros extras e sem diagnóstico
 # ============================================================
 
 import streamlit as st
 import pandas as pd
 import unicodedata
+import math
+import time
+import requests
+import numpy as np
 
 # ------------------------------------------------------------
 # Config
@@ -24,6 +30,69 @@ def strip_accents(s: str):
     if not isinstance(s, str):
         return s
     return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
+
+def haversine_km(lat1, lon1, lat2, lon2):
+    """
+    Distância Haversine em km entre dois pontos (pode receber arrays para lat2/lon2).
+    """
+    R = 6371.0088
+    lat1 = np.radians(lat1)
+    lon1 = np.radians(lon1)
+    lat2 = np.radians(lat2)
+    lon2 = np.radians(lon2)
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = np.sin(dlat/2.0)**2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon/2.0)**2
+    c = 2 * np.arcsin(np.sqrt(a))
+    return R * c
+
+# ------------------------------------------------------------
+# Geocodificação (Nominatim / OpenStreetMap)
+# ------------------------------------------------------------
+# Bounding box aproximado do RJ para "puxar" resultados corretos:
+RJ_VIEWBOX = (-43.8, -23.1, -43.0, -22.7)  # (min_lon, min_lat, max_lon, max_lat)
+
+@st.cache_data(show_spinner=False, ttl=3600)  # cacheia por 1h
+def geocode_nominatim(address: str):
+    """
+    Geocodifica um endereço com Nominatim (OpenStreetMap) e viés BR/RJ.
+    Retorna dict {lat, lon, display_name} ou None se não achar.
+    """
+    if not address or not address.strip():
+        return None
+
+    url = "https://nominatim.openstreetmap.org/search"
+    params = {
+        "q": address,
+        "format": "json",
+        "limit": 1,
+        "addressdetails": 0,
+        "countrycodes": "br",
+        "accept-language": "pt-BR",
+        # viés RJ
+        "viewbox": f"{RJ_VIEWBOX[0]},{RJ_VIEWBOX[1]},{RJ_VIEWBOX[2]},{RJ_VIEWBOX[3]}",
+        "bounded": 1,
+    }
+    headers = {
+        # Defina um user-agent identificável (idealmente com seu e-mail/site de contato).
+        "User-Agent": "busca-sites-b2b/1.0 (contato: raphael@exemplo.com)"
+    }
+    try:
+        # Respeito básico à política de uso (evita flood)
+        time.sleep(1.0)
+        r = requests.get(url, params=params, headers=headers, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        if not data:
+            return None
+        item = data[0]
+        return {
+            "lat": float(item["lat"]),
+            "lon": float(item["lon"]),
+            "display_name": item.get("display_name", address),
+        }
+    except Exception:
+        return None
 
 # ------------------------------------------------------------
 # Dados principais (aba: enderecos)
@@ -161,6 +230,7 @@ if st.button("🔄 Atualizar dados (limpar cache)"):
     st.cache_data.clear()
     st.experimental_rerun()
 
+# -------------------- BUSCA POR SIGLA (existente) --------------------
 with st.form("form_sigla", clear_on_submit=False):
     sigla = st.text_input("🔍 Buscar por SIGLA:")
     submitted = st.form_submit_button("OK")
@@ -170,17 +240,78 @@ if submitted:
 
 sigla_filtro = st.session_state.get("sigla", "")
 
-# ------------------------------------------------------------
-# Filtro
-# ------------------------------------------------------------
+# -------------------- NOVO: BUSCA POR ENDEREÇO -----------------------
+st.markdown("---")
+st.subheader("🧭 Buscar por ENDEREÇO do cliente → 3 ERBs mais próximas")
+
+with st.form("form_endereco", clear_on_submit=False):
+    endereco_cliente = st.text_input(
+        "Digite o endereço completo (rua, número, bairro, cidade) — preferencialmente no RJ"
+    )
+    submitted_endereco = st.form_submit_button("Buscar ERBs")
+
+if submitted_endereco:
+    st.session_state["endereco_cliente"] = endereco_cliente
+
+endereco_filtro = st.session_state.get("endereco_cliente", "")
+
+# Quando houver endereço, geocodificar e calcular top-3
+if endereco_filtro:
+    with st.spinner("Geocodificando endereço e calculando distâncias..."):
+        geo = geocode_nominatim(endereco_filtro)
+
+    if not geo:
+        st.error("❌ Endereço não encontrado. Tente ser mais específico (ex.: número, bairro, cidade).")
+    else:
+        lat_cli, lon_cli = geo["lat"], geo["lon"]
+        st.success("✅ Endereço localizado:")
+        st.markdown(
+            f"**{geo['display_name']}**  \n"
+            f"🧭 **Coordenadas**: {lat_cli:.6f}, {lon_cli:.6f}"
+        )
+
+        # Filtra apenas linhas com coordenadas válidas
+        base = df.dropna(subset=["lat", "lon"]).copy()
+        if base.empty:
+            st.warning("⚠️ Nenhuma ERB na planilha possui coordenadas válidas.")
+        else:
+            # Distâncias com Haversine (vetorizado)
+            base["dist_km"] = haversine_km(lat_cli, lon_cli, base["lat"].values, base["lon"].values)
+            top3 = base.nsmallest(3, "dist_km").copy()
+
+            st.markdown("### 📍 3 ERBs mais próximas")
+            mostrar_cols = [c for c in ["sigla", "nome", "detentora", "endereco", "lat", "lon", "dist_km"] if c in top3.columns]
+            st.dataframe(
+                top3[mostrar_cols].assign(dist_km=lambda d: d["dist_km"].round(3)),
+                use_container_width=True
+            )
+
+            # Cartões com links úteis (Mapa e Rota)
+            for i, row in top3.iterrows():
+                erb_lat, erb_lon = float(row["lat"]), float(row["lon"])
+                maps_erb = f"https://www.google.com/maps/search/?api=1&query={erb_lat},{erb_lon}"
+                rota = f"https://www.google.com/maps/dir/?api=1&origin={lat_cli},{lon_cli}&destination={erb_lat},{erb_lon}&travelmode=driving"
+
+                st.markdown(
+                    f"**{row.get('sigla', '—')} — {row.get('nome', '—')}**  \n"
+                    f"🗺️ Distância: **{row['dist_km']:.3f} km**  \n"
+                    f"📌 Coords: {erb_lat:.6f}, {erb_lon:.6f}"
+                )
+                cols = st.columns(2)
+                with cols[0]:
+                    st.link_button("🗺️ Ver ERB no Google Maps", maps_erb, type="primary")
+                with cols[1]:
+                    st.link_button("🚗 Traçar rota (origem = endereço do cliente)", rota)
+                st.markdown("---")
+
+st.markdown("---")
+
+# -------------------- RESULTADO DA BUSCA POR SIGLA (existente) --------------------
 if sigla_filtro:
     df_f = df[df["sigla"].astype(str).str.upper() == str(sigla_filtro).upper()].copy()
 else:
     df_f = pd.DataFrame()
 
-# ------------------------------------------------------------
-# Resultado
-# ------------------------------------------------------------
 if df_f.empty:
     st.warning("⚠️ Nenhum site encontrado.")
 else:
@@ -231,9 +362,8 @@ else:
 
         st.markdown("---")
 
-
-
 st.caption("❤️ Desenvolvido por Raphael Robles - Stay hungry, stay foolish ! 🚀")
+
 
 
 
