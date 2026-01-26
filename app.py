@@ -1,9 +1,8 @@
+
 # ============================================================
-# 📡 Endereços dos Sites RJ — Google Geocoding + Distance Matrix + Cache
-# - Mantém todo o comportamento atual
-# - Substitui Nominatim por Google Geocoding API
-# - Adiciona tempo/distância por rota (Distance Matrix API)
-# - Cache para reduzir custos e latência
+# 📡 Endereços dos Sites RJ — Google Geocoding + Distance Matrix
+# + Diagnóstico + Fallback OSM + Retry + Cache + Compat rerun
+# Mantém todas as funcionalidades originais por SIGLA e Acessos OK
 # ============================================================
 
 import streamlit as st
@@ -12,6 +11,7 @@ import unicodedata
 import time
 import requests
 import numpy as np
+from typing import List, Tuple, Optional
 
 # ------------------------------------------------------------
 # Config
@@ -19,15 +19,18 @@ import numpy as np
 st.set_page_config(page_title="Endereços dos Sites RJ", page_icon="📡", layout="wide")
 
 # ------------------------------------------------------------
-# Secrets / Chave da Google
+# Secrets / Chave Google
 # ------------------------------------------------------------
-API_KEY = st.secrets.get("GOOGLE_MAPS_API_KEY", "").strip()
+API_KEY = (st.secrets.get("GOOGLE_MAPS_API_KEY", "") or "").strip()
 
-if not API_KEY:
-    st.warning(
-        "⚠️ Configure sua chave em Settings → Secrets como `GOOGLE_MAPS_API_KEY`. "
-        "Enquanto isso, a busca por endereço/rota ficará indisponível."
-    )
+# ------------------------------------------------------------
+# Helper: rerun compatível (Streamlit novo/antigo)
+# ------------------------------------------------------------
+def _rerun():
+    if hasattr(st, "rerun"):
+        st.rerun()
+    else:
+        st.experimental_rerun()
 
 # ------------------------------------------------------------
 # Auxiliares
@@ -38,7 +41,7 @@ def strip_accents(s: str):
     return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
 
 def haversine_km(lat1, lon1, lat2, lon2):
-    """Distância Haversine em km (aceita arrays em lat2/lon2)."""
+    """Distância Haversine em km (vetorizado para lat2/lon2)."""
     R = 6371.0088
     lat1 = np.radians(lat1)
     lon1 = np.radians(lon1)
@@ -51,93 +54,233 @@ def haversine_km(lat1, lon1, lat2, lon2):
     return R * c
 
 # ------------------------------------------------------------
-# GOOGLE GEOCODING API (Endereço -> Coordenadas)
+# Parâmetros de Geocoding
 # ------------------------------------------------------------
-@st.cache_data(show_spinner=False, ttl=60*60)  # 1h de cache por endereço
-def geocode_google(address: str):
+# Bounds aproximado do RJ (latSW,lngSW|latNE,lngNE)
+RJ_BOUNDS = "-23.1,-43.8|-22.7,-43.0"   # opcional, melhora match no RJ
+
+# Status que valem retry (transientes)
+RETRYABLE_STATUSES = {"UNKNOWN_ERROR", "OVER_QUERY_LIMIT", "RESOURCE_EXHAUSTED"}
+
+# ------------------------------------------------------------
+# Geocoding - Google com diagnóstico e retry
+# ------------------------------------------------------------
+@st.cache_data(show_spinner=False, ttl=60*60)
+def geocode_google_verbose(address: str, use_bounds: bool = True, max_retries: int = 2, base_sleep: float = 1.0):
     """
-    Retorna: {'lat': float, 'lon': float, 'formatted': str} ou None
-    Usa Geocoding API (Google).
+    Geocodifica endereço via Google Geocoding API.
+    Retorna: (result, debug)
+      result: {'lat': float, 'lon': float, 'formatted': str} ou None
+      debug:  {'provider','status','error_message','raw_sample'}
+    - Usa region=br, language=pt-BR, components=country:BR
+    - Opcional bounds do RJ
+    - Retry exponencial para erros transitórios
     """
+    dbg = {"provider": "google", "status": None, "error_message": None, "raw_sample": None}
+
     if not API_KEY or not address or not address.strip():
-        return None
+        dbg["status"] = "MISSING_API_KEY_OR_ADDRESS"
+        return None, dbg
+
     url = "https://maps.googleapis.com/maps/api/geocode/json"
     params = {
         "address": address,
-        "region": "br",        # favorece resultados no Brasil
-        "language": "pt-BR",   # nomes em pt-BR quando possível
-        "key": API_KEY
+        "region": "br",
+        "language": "pt-BR",
+        "components": "country:BR",
     }
-    try:
-        r = requests.get(url, params=params, timeout=10)
-        r.raise_for_status()
-        data = r.json()
-        if data.get("status") != "OK" or not data.get("results"):
-            return None
-        res = data["results"][0]
-        loc = res["geometry"]["location"]
-        return {
-            "lat": float(loc["lat"]),
-            "lon": float(loc["lng"]),
-            "formatted": res.get("formatted_address") or address
-        }
-    except Exception:
-        return None
+    if use_bounds:
+        params["bounds"] = RJ_BOUNDS
+
+    sleep = base_sleep
+    for attempt in range(max_retries + 1):
+        try:
+            resp = requests.get(url, params={**params, "key": API_KEY}, timeout=10)
+            data = resp.json()
+            status = data.get("status")
+            dbg["status"] = status
+            dbg["error_message"] = data.get("error_message")
+            dbg["raw_sample"] = {
+                "results_len": len(data.get("results", [])),
+                "first": data.get("results", [{}])[0].get("formatted_address") if data.get("results") else None
+            }
+
+            if status == "OK" and data.get("results"):
+                res = data["results"][0]
+                loc = res["geometry"]["location"]
+                return {
+                    "lat": float(loc["lat"]),
+                    "lon": float(loc["lng"]),
+                    "formatted": res.get("formatted_address") or address
+                }, dbg
+
+            # ZERO_RESULTS é caso normal (endereço inválido/ambíguo)
+            if status == "ZERO_RESULTS":
+                return None, dbg
+
+            # Status transitório? Retry
+            if status in RETRYABLE_STATUSES and attempt < max_retries:
+                time.sleep(sleep)
+                sleep *= 2
+                continue
+
+            # Qualquer outro erro: não retry
+            return None, dbg
+
+        except requests.exceptions.Timeout:
+            dbg["status"] = "TIMEOUT"
+            if attempt < max_retries:
+                time.sleep(sleep)
+                sleep *= 2
+                continue
+            return None, dbg
+        except Exception as e:
+            dbg["status"] = "EXCEPTION"
+            dbg["error_message"] = str(e)
+            return None, dbg
 
 # ------------------------------------------------------------
-# GOOGLE DISTANCE MATRIX (origem -> destinos) por carro
+# Fallback: Nominatim (OSM) caso Google falhe
 # ------------------------------------------------------------
-@st.cache_data(show_spinner=False, ttl=15*60)  # 15 min de cache por conjunto origem/destinos
-def distance_matrix_google(origin_lat, origin_lon, dests, mode="driving"):
+@st.cache_data(show_spinner=False, ttl=60*60)
+def geocode_nominatim(address: str):
     """
-    Calcula tempo/distância dirigindo entre origem e destinos.
-    dests: lista de tuplas (lat, lon)
-    Retorna lista de dicts com 'distance_m', 'distance_text', 'duration_s', 'duration_text'
-    na mesma ordem de dests. Se falhar, retorna lista vazia.
+    Fallback leve usando Nominatim (sem chave).
+    Retorna (result, debug)
     """
+    dbg = {"provider": "nominatim", "status": None, "error_message": None, "raw_sample": None}
+    if not address or not address.strip():
+        dbg["status"] = "MISSING_ADDRESS"
+        return None, dbg
+    try:
+        # respeita política de uso (não flood)
+        time.sleep(1.0)
+        r = requests.get(
+            "https://nominatim.openstreetmap.org/search",
+            params={
+                "q": address,
+                "format": "json",
+                "limit": 1,
+                "countrycodes": "br",
+                "accept-language": "pt-BR"
+            },
+            headers={"User-Agent": "busca-sites-b2b/1.0"},
+            timeout=10
+        )
+        j = r.json()
+        if j:
+            item = j[0]
+            dbg["status"] = "OK"
+            dbg["raw_sample"] = {"display_name": item.get("display_name")}
+            return {
+                "lat": float(item["lat"]),
+                "lon": float(item["lon"]),
+                "formatted": item.get("display_name")
+            }, dbg
+        else:
+            dbg["status"] = "ZERO_RESULTS"
+            return None, dbg
+    except requests.exceptions.Timeout:
+        dbg["status"] = "TIMEOUT"
+        return None, dbg
+    except Exception as e:
+        dbg["status"] = "EXCEPTION"
+        dbg["error_message"] = str(e)
+        return None, dbg
+
+def geocode_fallback(address: str, use_bounds: bool = True):
+    """
+    Tenta Google; se falhar por erro/limite/denied, tenta Nominatim.
+    Retorna (result, diag_combined)
+    """
+    res, dbg = geocode_google_verbose(address, use_bounds=use_bounds)
+    if res:
+        return res, dbg
+    # Se foi ZERO_RESULTS, não vale insistir com OSM (mas podemos tentar)
+    if dbg.get("status") in {"OVER_QUERY_LIMIT", "RESOURCE_EXHAUSTED", "REQUEST_DENIED", "TIMEOUT", "EXCEPTION", "UNKNOWN_ERROR"}:
+        res2, dbg2 = geocode_nominatim(address)
+        if res2:
+            return res2, dbg2
+        return None, {"provider": "none", "status": f"google_{dbg.get('status')}_and_osm_{dbg2.get('status')}", "error_message": dbg.get("error_message")}
+    else:
+        # ZERO_RESULTS ou outros
+        return None, dbg
+
+# ------------------------------------------------------------
+# Distance Matrix (rota) com debug e cache
+# ------------------------------------------------------------
+@st.cache_data(show_spinner=False, ttl=15*60)
+def distance_matrix_google(origin_lat: float, origin_lon: float, dests: List[Tuple[float, float]], mode="driving", max_retries: int = 2):
+    """
+    Calcula tempo/distância por rota (Google Distance Matrix).
+    Retorna (out, dbg) onde:
+      out: lista dicts na mesma ordem dos destinos
+      dbg: {'status','error_message'}
+    """
+    dbg = {"status": None, "error_message": None}
     if not API_KEY or not dests:
-        return []
+        dbg["status"] = "MISSING_API_KEY_OR_DESTS"
+        return [], dbg
 
     origins = f"{origin_lat},{origin_lon}"
     destinations = "|".join([f"{lat},{lon}" for (lat, lon) in dests])
-
     url = "https://maps.googleapis.com/maps/api/distancematrix/json"
-    params = {
-        "origins": origins,
-        "destinations": destinations,
-        "mode": mode,
-        "language": "pt-BR",
-        "key": API_KEY
-    }
-    try:
-        r = requests.get(url, params=params, timeout=10)
-        r.raise_for_status()
-        data = r.json()
-        if data.get("status") != "OK":
-            return []
 
-        rows = data.get("rows", [])
-        if not rows:
-            return []
+    sleep = 1.0
+    for attempt in range(max_retries + 1):
+        try:
+            r = requests.get(url, params={
+                "origins": origins,
+                "destinations": destinations,
+                "mode": mode,
+                "language": "pt-BR",
+                "key": API_KEY
+            }, timeout=10)
+            data = r.json()
+            status = data.get("status")
+            dbg["status"] = status
+            dbg["error_message"] = data.get("error_message")
 
-        elements = rows[0].get("elements", [])
-        out = []
-        for el in elements:
-            if el.get("status") == "OK":
-                out.append({
-                    "distance_m": el["distance"]["value"],
-                    "distance_text": el["distance"]["text"],
-                    "duration_s": el["duration"]["value"],
-                    "duration_text": el["duration"]["text"],
-                })
-            else:
-                out.append({
-                    "distance_m": None, "distance_text": None,
-                    "duration_s": None, "duration_text": None
-                })
-        return out
-    except Exception:
-        return []
+            if status == "OK":
+                rows = data.get("rows", [])
+                if not rows:
+                    return [], dbg
+                elements = rows[0].get("elements", [])
+                out = []
+                for el in elements:
+                    if el.get("status") == "OK":
+                        out.append({
+                            "distance_m": el["distance"]["value"],
+                            "distance_text": el["distance"]["text"],
+                            "duration_s": el["duration"]["value"],
+                            "duration_text": el["duration"]["text"],
+                        })
+                    else:
+                        out.append({
+                            "distance_m": None, "distance_text": None,
+                            "duration_s": None, "duration_text": None
+                        })
+                return out, dbg
+
+            # Retry em status transitórios
+            if status in RETRYABLE_STATUSES and attempt < max_retries:
+                time.sleep(sleep)
+                sleep *= 2
+                continue
+
+            return [], dbg
+
+        except requests.exceptions.Timeout:
+            dbg["status"] = "TIMEOUT"
+            if attempt < max_retries:
+                time.sleep(sleep)
+                sleep *= 2
+                continue
+            return [], dbg
+        except Exception as e:
+            dbg["status"] = "EXCEPTION"
+            dbg["error_message"] = str(e)
+            return [], dbg
 
 # ------------------------------------------------------------
 # Dados principais (aba: enderecos)
@@ -267,17 +410,13 @@ ACESSOS_OK = carregar_acessos_ok()
 # ------------------------------------------------------------
 st.title("📡 Endereços dos Sites RJ")
 
-
-def _rerun():
-    if hasattr(st, "rerun"):
-        st.rerun()
-    else:
-        st.experimental_rerun()
-
 if st.button("🔄 Atualizar dados (limpar cache)"):
     st.cache_data.clear()
     _rerun()
 
+if not API_KEY:
+    st.warning("⚠️ Configure sua chave em Settings → Secrets como `GOOGLE_MAPS_API_KEY`. "
+               "Sem isso, a busca por endereço/rota usará apenas o fallback OSM (quando possível).")
 
 # -------------------- BUSCA POR SIGLA (existente) --------------------
 with st.form("form_sigla", clear_on_submit=False):
@@ -289,7 +428,7 @@ if submitted:
 
 sigla_filtro = st.session_state.get("sigla", "")
 
-# -------------------- NOVO: BUSCA POR ENDEREÇO (Google) -------------
+# -------------------- BUSCA POR ENDEREÇO (NOVO) ---------------------
 st.markdown("---")
 st.subheader("🧭 Buscar por ENDEREÇO do cliente → 3 ERBs mais próximas")
 
@@ -297,84 +436,109 @@ with st.form("form_endereco", clear_on_submit=False):
     endereco_cliente = st.text_input(
         "Digite o endereço completo (rua, número, bairro, cidade — RJ de preferência)"
     )
+    use_bounds = st.checkbox("Viés RJ (melhorar acerto usando bounds do RJ)", value=True)
+    mostrar_diag = st.checkbox("Mostrar diagnóstico de Geocoding (temporário)", value=False)
     submitted_endereco = st.form_submit_button("Buscar ERBs")
 
 if submitted_endereco:
     st.session_state["endereco_cliente"] = endereco_cliente
+    st.session_state["use_bounds"] = use_bounds
+    st.session_state["mostrar_diag"] = mostrar_diag
 
 endereco_filtro = st.session_state.get("endereco_cliente", "")
+use_bounds = st.session_state.get("use_bounds", True)
+mostrar_diag = st.session_state.get("mostrar_diag", False)
 
 if endereco_filtro:
-    if not API_KEY:
-        st.error("❌ Falta configurar `GOOGLE_MAPS_API_KEY` em Secrets para usar a busca por endereço.")
+    with st.spinner("Geocodificando endereço e calculando distâncias..."):
+        geo, dbg = geocode_fallback(endereco_filtro, use_bounds=use_bounds)
+
+    # Diagnóstico opcional
+    if mostrar_diag:
+        st.code(
+            f"Provider: {dbg.get('provider')}\n"
+            f"Status:   {dbg.get('status')}\n"
+            f"Erro:     {dbg.get('error_message')}\n"
+            f"Amostra:  {dbg.get('raw_sample')}",
+            language="text"
+        )
+
+    if not geo:
+        st.error("❌ Endereço não encontrado. Tente incluir número/bairro/cidade. "
+                 "Se persistir, revise as restrições da API key (Geocoding habilitado, Application=None, API restrito).")
     else:
-        with st.spinner("Geocodificando endereço (Google) e calculando distâncias..."):
-            geo = geocode_google(endereco_filtro)
+        lat_cli, lon_cli = geo["lat"], geo["lon"]
+        prov = dbg.get("provider", "google")
+        st.success(f"✅ Endereço localizado ({'Google' if prov=='google' else 'OSM'}):")
+        st.markdown(
+            f"**{geo['formatted']}**  \n"
+            f"🧭 **Coordenadas**: {lat_cli:.6f}, {lon_cli:.6f}"
+        )
 
-        if not geo:
-            st.error("❌ Endereço não encontrado. Tente ser mais específico (número/bairro/cidade).")
+        # Filtra ERBs com coordenadas válidas
+        base = df.dropna(subset=["lat", "lon"]).copy()
+        if base.empty:
+            st.warning("⚠️ Nenhuma ERB na planilha possui coordenadas válidas.")
         else:
-            lat_cli, lon_cli = geo["lat"], geo["lon"]
-            st.success("✅ Endereço localizado:")
-            st.markdown(
-                f"**{geo['formatted']}**  \n"
-                f"🧭 **Coordenadas**: {lat_cli:.6f}, {lon_cli:.6f}"
-            )
+            base["dist_km_linear"] = haversine_km(lat_cli, lon_cli, base["lat"].values, base["lon"].values)
+            top3 = base.nsmallest(3, "dist_km_linear").copy()
 
-            # Filtra apenas linhas com coordenadas válidas
-            base = df.dropna(subset=["lat", "lon"]).copy()
-            if base.empty:
-                st.warning("⚠️ Nenhuma ERB na planilha possui coordenadas válidas.")
-            else:
-                # Distância geodésica (linha reta) para ranking inicial
-                base["dist_km_linear"] = haversine_km(lat_cli, lon_cli, base["lat"].values, base["lon"].values)
-                top3 = base.nsmallest(3, "dist_km_linear").copy()
-
-                # Chama Distance Matrix para tempo/distância por rota
-                destinos = [(float(r["lat"]), float(r["lon"])) for _, r in top3.iterrows()]
-                dm = distance_matrix_google(lat_cli, lon_cli, destinos, mode="driving")
-
-                # Anexa resultados (se disponíveis)
-                if dm and len(dm) == len(top3):
-                    top3 = top3.reset_index(drop=True)
-                    top3["dist_rodov_text"] = [x["distance_text"] for x in dm]
-                    top3["duracao_text"] = [x["duration_text"] for x in dm]
-                    top3["duracao_s"] = [x["duration_s"] for x in dm]
-                else:
-                    top3["dist_rodov_text"] = pd.NA
-                    top3["duracao_text"] = pd.NA
-                    top3["duracao_s"] = pd.NA
-
-                st.markdown("### 📍 3 ERBs mais próximas (ranking por linha reta, com rota quando disponível)")
-                mostrar_cols = [c for c in [
-                    "sigla", "nome", "detentora", "endereco", "lat", "lon",
-                    "dist_km_linear", "dist_rodov_text", "duracao_text"
-                ] if c in top3.columns]
-                st.dataframe(
-                    top3[mostrar_cols].assign(dist_km_linear=lambda d: d["dist_km_linear"].round(3)),
-                    use_container_width=True
+            # Distance Matrix (rota) – só se tiver API_KEY
+            dm_out, dm_dbg = ([], {})
+            if API_KEY:
+                dm_out, dm_dbg = distance_matrix_google(
+                    lat_cli, lon_cli,
+                    [(float(r["lat"]), float(r["lon"])) for _, r in top3.iterrows()],
+                    mode="driving"
                 )
 
-                # Cartões com links (Mapa e Rota)
-                for _, row in top3.iterrows():
-                    erb_lat, erb_lon = float(row["lat"]), float(row["lon"])
-                    maps_erb = f"https://www.google.com/maps/search/?api=1&query={erb_lat},{erb_lon}"
-                    rota = f"https://www.google.com/maps/dir/?api=1&origin={lat_cli},{lon_cli}&destination={erb_lat},{erb_lon}&travelmode=driving"
+            if dm_out and len(dm_out) == len(top3):
+                top3 = top3.reset_index(drop=True)
+                top3["dist_rodov_text"] = [x["distance_text"] for x in dm_out]
+                top3["duracao_text"] = [x["duration_text"] for x in dm_out]
+                top3["duracao_s"] = [x["duration_s"] for x in dm_out]
+            else:
+                top3["dist_rodov_text"] = pd.NA
+                top3["duracao_text"] = pd.NA
+                top3["duracao_s"] = pd.NA
 
-                    title = f"**{row.get('sigla', '—')} — {row.get('nome', '—')}**"
-                    meta = (
-                        f"🗺️ Linha reta: **{row['dist_km_linear']:.3f} km**  \n"
-                        f"🚗 Rota: {row.get('dist_rodov_text') or '—'}  \n"
-                        f"⏱️ Tempo: {row.get('duracao_text') or '—'}  \n"
-                        f"📌 Coords: {erb_lat:.6f}, {erb_lon:.6f}"
-                    )
-                    st.markdown(title + "  \n" + meta)
-                    cols = st.columns(2)
-                    with cols[0]:
-                        st.link_button("🗺️ Ver ERB no Google Maps", maps_erb, type="primary")
-                    with cols[1]:
-                        st.link_button("🚗 Traçar rota a partir do cliente", rota)
-                    st.markdown("---")
+            st.markdown("### 📍 3 ERBs mais próximas (ranking por linha reta; rota quando disponível)")
+            mostrar_cols = [c for c in [
+                "sigla", "nome", "detentora", "endereco", "lat", "lon",
+                "dist_km_linear", "dist_rodov_text", "duracao_text"
+            ] if c in top3.columns]
+            st.dataframe(
+                top3[mostrar_cols].assign(dist_km_linear=lambda d: d["dist_km_linear"].round(3)),
+                use_container_width=True
+            )
+
+            # Diagnóstico Distance Matrix (se pedido)
+            if mostrar_diag and dm_dbg:
+                st.code(
+                    f"[DistanceMatrix] Status: {dm_dbg.get('status')} | Erro: {dm_dbg.get('error_message')}",
+                    language="text"
+                )
+
+            # Cartões com links (Mapa e Rota)
+            for _, row in top3.iterrows():
+                erb_lat, erb_lon = float(row["lat"]), float(row["lon"])
+                maps_erb = f"https://www.google.com/maps/search/?api=1&query={erb_lat},{erb_lon}"
+                rota = f"https://www.google.com/maps/dir/?api=1&origin={lat_cli},{lon_cli}&destination={erb_lat},{erb_lon}&travelmode=driving"
+
+                title = f"**{row.get('sigla', '—')} — {row.get('nome', '—')}**"
+                meta = (
+                    f"🗺️ Linha reta: **{row['dist_km_linear']:.3f} km**  \n"
+                    f"🚗 Rota: {row.get('dist_rodov_text') or '—'}  \n"
+                    f"⏱️ Tempo: {row.get('duracao_text') or '—'}  \n"
+                    f"📌 Coords: {erb_lat:.6f}, {erb_lon:.6f}"
+                )
+                st.markdown(title + "  \n" + meta)
+                cols = st.columns(2)
+                with cols[0]:
+                    st.link_button("🗺️ Ver ERB no Google Maps", maps_erb, type="primary")
+                with cols[1]:
+                    st.link_button("🚗 Traçar rota a partir do cliente", rota)
+                st.markdown("---")
 
 st.markdown("---")
 
