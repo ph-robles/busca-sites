@@ -1,8 +1,9 @@
+
 # ============================================================
 # 📡 Endereços dos Sites RJ — OSM/OSRM Edition (100% gratuito)
 # - Geocoding: Geoapify (opcional, com key) → fallback Nominatim (sem key)
 # - Rotas/Matriz: OSRM (sem key) para distância/tempo por trajeto
-# - Sem checkboxes/diagnóstico na UI (limpo)
+# - Sem mensagens/diagnóstico na UI
 # - Corrige pd.NA em f-strings (sem usar `or` com pd.NA)
 # - Mantém toda a lógica de SIGLA e Acessos OK
 # ============================================================
@@ -375,11 +376,6 @@ if st.button("🔄 Atualizar dados (limpar cache)"):
     st.cache_data.clear()
     _rerun()
 
-if GEOAPIFY_KEY:
-    st.caption("🧭 Geocoding primário: Geoapify (free tier). Fallback: Nominatim (OSM).")
-else:
-    st.caption("🧭 Geocoding: Nominatim (OSM) — configure GEOAPIFY_KEY em Secrets para opção extra.")
-
 # -------------------- BUSCA POR SIGLA (existente) --------------------
 with st.form("form_sigla", clear_on_submit=False):
     sigla = st.text_input("🔍 Buscar por SIGLA:")
@@ -396,9 +392,9 @@ st.subheader("🧭 Buscar por ENDEREÇO do cliente → 3 sites mais próximos")
 
 with st.form("form_endereco", clear_on_submit=False):
     endereco_cliente = st.text_input(
-        "Digite o endereço completo (rua, número, bairro, cidade — RJ de preferência)"
+        "Digite o endereço completo (rua, número, bairro, cidade)"
     )
-    submitted_endereco = st.form_submit_button("Buscar ERBs")
+    submitted_endereco = st.form_submit_button("Buscar sites")
 
 if submitted_endereco:
     st.session_state["endereco_cliente"] = endereco_cliente
@@ -423,7 +419,7 @@ if endereco_filtro:
         # Filtra ERBs com coordenadas válidas
         base = df.dropna(subset=["lat", "lon"]).copy()
         if base.empty:
-            st.warning("⚠️ Nenhuma ERB na planilha possui coordenadas válidas.")
+            st.warning("⚠️ Nenhum site na planilha possui coordenadas válidas.")
         else:
             base["dist_km_linear"] = haversine_km(lat_cli, lon_cli, base["lat"].values, base["lon"].values)
             top3 = base.nsmallest(3, "dist_km_linear").copy()
@@ -445,7 +441,7 @@ if endereco_filtro:
                 top3["duracao_text"]    = pd.NA
                 top3["duracao_s"]       = pd.NA
 
-            st.markdown("### 📍 3 sites mais próximos (linha reta; rota quando disponível)")
+            st.markdown("### 📍 3 sites mais próximos")
             mostrar_cols = [c for c in [
                 "sigla", "nome", "detentora", "endereco", "lat", "lon",
                 "dist_km_linear", "dist_rodov_text", "duracao_text"
@@ -528,6 +524,7 @@ else:
         st.markdown("---")
 
 st.caption("❤️ Desenvolvido por Raphael Robles - Stay hungry, stay foolish ! 🚀")
+
 
 
 
