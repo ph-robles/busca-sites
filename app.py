@@ -392,7 +392,7 @@ sigla_filtro = st.session_state.get("sigla", "")
 
 # -------------------- BUSCA POR ENDEREÇO (sem diagnóstico) ----------
 st.markdown("---")
-st.subheader("🧭 Buscar por ENDEREÇO do cliente → 3 ERBs mais próximas")
+st.subheader("🧭 Buscar por ENDEREÇO do cliente → 3 sites mais próximos")
 
 with st.form("form_endereco", clear_on_submit=False):
     endereco_cliente = st.text_input(
@@ -445,7 +445,7 @@ if endereco_filtro:
                 top3["duracao_text"]    = pd.NA
                 top3["duracao_s"]       = pd.NA
 
-            st.markdown("### 📍 3 ERBs mais próximas (linha reta; rota quando disponível)")
+            st.markdown("### 📍 3 sites mais próximos (linha reta; rota quando disponível)")
             mostrar_cols = [c for c in [
                 "sigla", "nome", "detentora", "endereco", "lat", "lon",
                 "dist_km_linear", "dist_rodov_text", "duracao_text"
@@ -474,7 +474,7 @@ if endereco_filtro:
                 st.markdown(title + "  \n" + meta)
                 cols = st.columns(2)
                 with cols[0]:
-                    st.link_button("🗺️ Ver ERB no Google Maps", maps_erb, type="primary")
+                    st.link_button("🗺️ Ver no Google Maps", maps_erb, type="primary")
                 with cols[1]:
                     st.link_button("🚗 Traçar rota a partir do cliente", rota)
                 st.markdown("---")
@@ -528,6 +528,7 @@ else:
         st.markdown("---")
 
 st.caption("❤️ Desenvolvido por Raphael Robles - Stay hungry, stay foolish ! 🚀")
+
 
 
 
