@@ -1,5 +1,5 @@
 
-==========================================================
+# ==========================================================
 # 📡 Endereços dos Sites RJ — Versão OTIMIZADA e ESTÁVEL (+ busca por endereço)
 # - Lê aba "enderecos" com colunas reais da sua planilha
 # - Busca por SIGLA (como antes)
@@ -363,6 +363,7 @@ else:
         st.markdown("---")
 
 st.caption("❤️ Desenvolvido por Raphael Robles - Stay hungry, stay foolish ! 🚀")
+
 
 
 
