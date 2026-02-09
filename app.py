@@ -1,4 +1,3 @@
-
 # ============================================================
 # 📡 Endereços dos Sites RJ — OSM/OSRM Edition (100% gratuito)
 # - Geocoding: Geoapify (opcional, com key) → fallback Nominatim (sem key)
@@ -19,7 +18,7 @@ import requests
 import numpy as np
 import math
 import re
-import os  # <-- NOVO
+import os  # para fingerprint do arquivo
 from typing import List, Tuple
 
 # ------------------------------------------------------------
@@ -560,7 +559,7 @@ if endereco_filtro:
             st.markdown("### 📍 3 sites mais próximos (Quando disponível)")
             mostrar_cols = [c for c in [
                 "sigla", "nome", "detentora", "endereco", "lat", "lon",
-                "capacitado",  # <-- NOVO
+                "capacitado",  # NOVO
                 "dist_km_linear", "dist_rodov_text", "duracao_text"
             ] if c in top3.columns]
             st.dataframe(
@@ -570,7 +569,8 @@ if endereco_filtro:
 
             # Cartões com links (Mapa e Rota) — sem usar `or` com pd.NA
             for _, row in top3.iterrows():
-                erb_lat, erb_lon = float(row["lat"]), float(row["lon"])]
+                # ====== LINHA CORRIGIDA (sem colchete extra) ======
+                erb_lat, erb_lon = float(row["lat"]), float(row["lon"])
                 maps_erb = f"https://www.google.com/maps/search/?api=1&query={erb_lat},{erb_lon}"
                 rota = f"https://www.google.com/maps/dir/?api=1&origin={lat_cli},{lon_cli}&destination={erb_lat},{erb_lon}&travelmode=driving"
 
@@ -627,7 +627,7 @@ else:
     for _, row in df_f.iterrows():
         st.markdown(f"**{row['sigla']} — {row['nome']}**")
 
-        if pd.notna(row.get("lat")) and pd.notna(row.get("lon")):
+        if pd.notna(row.get("lat")) and pd.notna(row.get("lon"])):
             url = f"https://www.google.com/maps/search/?api=1&query={row['lat']},{row['lon']}"
             st.link_button("🗺️ Ver no Google Maps", url, type="primary")
 
@@ -647,6 +647,7 @@ else:
         st.markdown("---")
 
 st.caption("❤️ Desenvolvido por Raphael Robles - Stay hungry, stay foolish ! 🚀")
+
 
 
 
