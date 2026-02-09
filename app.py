@@ -7,7 +7,7 @@
 # - Sem mensagens/diagnóstico na UI
 # - Corrige pd.NA em f-strings (sem usar `or` com pd.NA)
 # - Mantém toda a lógica de SIGLA e Acessos OK
-# - NOVO: Coluna 'CAPACITADO' na UI (badges) + banner automático em atualização da base
+# - NOVO: Coluna 'CAPACITADO' na UI (badges), banner automático e Top3 sempre com o capacitado mais próximo
 # ============================================================
 
 import streamlit as st
@@ -211,7 +211,7 @@ def geocode_geoapify(address: str):
     params = {
         "text": address,
         "lang": "pt",
-        "filter": "countrycode:br",   # restringe ao Brasil
+        "filter": "countrycode:br",
         "limit": 1,
         "apiKey": GEOAPIFY_KEY
     }
@@ -296,20 +296,16 @@ def geocode_address(address: str):
       2) Nominatim com viés RJ estrito
       3) Nominatim sem bounded (apenas BR)
     """
-    # 1) Geoapify
     if GEOAPIFY_KEY:
         res, dbg = geocode_geoapify(address)
         if res:
             return res, dbg
-    # 2) Nominatim com RJ estrito
     res2, dbg2 = geocode_nominatim(address, strict_rj=True)
     if res2:
         return res2, dbg2
-    # 3) Nominatim sem bounded (Brasil inteiro)
     res3, dbg3 = geocode_nominatim(address, strict_rj=False)
     if res3:
         return res3, dbg3
-    # nada encontrado
     return None, {"provider": "none", "status": "ZERO_RESULTS", "error_message": None}
 
 # ------------------------------------------------------------
@@ -536,8 +532,48 @@ if endereco_filtro:
         if base.empty:
             st.warning("⚠️ Nenhuma ERB na planilha possui coordenadas válidas.")
         else:
+            # Distância em linha reta para todas as ERBs
             base["dist_km_linear"] = haversine_km(lat_cli, lon_cli, base["lat"].values, base["lon"].values)
+
+            # 1) Top 3 normal
             top3 = base.nsmallest(3, "dist_km_linear").copy()
+
+            # 2) Encontrar o site capacitado mais próximo
+            base_cap = base[base["capacitado"].apply(is_yes) == True].copy()
+            forced_cap_row = None
+            if not base_cap.empty:
+                idx_min_cap = base_cap["dist_km_linear"].idxmin()
+                forced_cap_row = base_cap.loc[[idx_min_cap]].copy()  # DataFrame com 1 linha
+
+            # 3) Forçar inclusão do capacitado mais próximo no Top 3
+            if forced_cap_row is not None:
+                # Se a SIGLA do capacitado mais próximo não está no top3, incluir e limitar a 3 itens
+                if forced_cap_row.iloc[0]["sigla"] not in top3["sigla"].astype(str).tolist():
+                    union_df = pd.concat([top3, forced_cap_row], ignore_index=True)
+
+                    # Ordena por distância e remove duplicatas por SIGLA (mantendo o mais próximo)
+                    union_df = union_df.sort_values("dist_km_linear", ascending=True)
+                    union_df = union_df.drop_duplicates(subset=["sigla"], keep="first")
+
+                    # Se ainda tiver mais que 3, garantir que a linha capacitada fique presente:
+                    if len(union_df) > 3:
+                        # Se a linha capacitada NÃO está no top3 após ordenação, forçar presença:
+                        sigla_cap = forced_cap_row.iloc[0]["sigla"]
+                        first3 = union_df.head(3)
+                        if sigla_cap not in first3["sigla"].astype(str).tolist():
+                            # Pegar os 2 primeiros + a linha capacitada
+                            # (removendo se por acaso já duplicou)
+                            union_df = pd.concat([union_df.head(2), forced_cap_row], ignore_index=True)
+                            # Ordena de novo apenas para manter coerência visual
+                            union_df = union_df.sort_values("dist_km_linear", ascending=True)
+                    # Limita a 3 final
+                    top3 = union_df.head(3).reset_index(drop=True)
+                else:
+                    # Já estava no top3 — apenas garantir ordenação por distância
+                    top3 = top3.sort_values("dist_km_linear", ascending=True).reset_index(drop=True)
+            else:
+                # Não há capacitados na base — segue o top3 normal
+                top3 = top3.sort_values("dist_km_linear", ascending=True).reset_index(drop=True)
 
             # OSRM: origem -> destinos top3
             dm_out, dm_dbg = osrm_table(
@@ -546,7 +582,6 @@ if endereco_filtro:
             )
 
             if dm_out and len(dm_out) == len(top3) and (dm_dbg.get("status") in ("Ok", "OK", None)):
-                top3 = top3.reset_index(drop=True)
                 top3["dist_rodov_text"] = [x["distance_text"] for x in dm_out]
                 top3["duracao_text"]    = [x["duration_text"] for x in dm_out]
                 top3["duracao_s"]       = [x["duration_s"] for x in dm_out]
@@ -556,10 +591,10 @@ if endereco_filtro:
                 top3["duracao_text"]    = pd.NA
                 top3["duracao_s"]       = pd.NA
 
-            st.markdown("### 📍 3 sites mais próximos (Quando disponível)")
+            st.markdown("### 📍 3 sites mais próximos (com priorização de capacitado mais próximo)")
             mostrar_cols = [c for c in [
                 "sigla", "nome", "detentora", "endereco", "lat", "lon",
-                "capacitado",  # NOVO
+                "capacitado",
                 "dist_km_linear", "dist_rodov_text", "duracao_text"
             ] if c in top3.columns]
             st.dataframe(
@@ -567,9 +602,8 @@ if endereco_filtro:
                 use_container_width=True
             )
 
-            # Cartões com links (Mapa e Rota) — sem usar `or` com pd.NA
+            # Cartões com links (Mapa e Rota)
             for _, row in top3.iterrows():
-                # ====== LINHA CORRIGIDA (sem colchete extra) ======
                 erb_lat, erb_lon = float(row["lat"]), float(row["lon"])
                 maps_erb = f"https://www.google.com/maps/search/?api=1&query={erb_lat},{erb_lon}"
                 rota = f"https://www.google.com/maps/dir/?api=1&origin={lat_cli},{lon_cli}&destination={erb_lat},{erb_lon}&travelmode=driving"
@@ -627,7 +661,7 @@ else:
     for _, row in df_f.iterrows():
         st.markdown(f"**{row['sigla']} — {row['nome']}**")
 
-        if pd.notna(row.get("lat")) and pd.notna(row.get("lon")):
+        if pd.notna(row.get("lat")) and pd.notna(row.get("lon"])):
             url = f"https://www.google.com/maps/search/?api=1&query={row['lat']},{row['lon']}"
             st.link_button("🗺️ Ver no Google Maps", url, type="primary")
 
@@ -647,6 +681,7 @@ else:
         st.markdown("---")
 
 st.caption("❤️ Desenvolvido por Raphael Robles - Stay hungry, stay foolish ! 🚀")
+
 
 
 
