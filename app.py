@@ -661,7 +661,7 @@ else:
     for _, row in df_f.iterrows():
         st.markdown(f"**{row['sigla']} — {row['nome']}**")
 
-        if pd.notna(row.get("lat")) and pd.notna(row.get("lon"])):
+        if pd.notna(row.get("lat")) and pd.notna(row.get("lon")):
             url = f"https://www.google.com/maps/search/?api=1&query={row['lat']},{row['lon']}"
             st.link_button("🗺️ Ver no Google Maps", url, type="primary")
 
@@ -681,6 +681,7 @@ else:
         st.markdown("---")
 
 st.caption("❤️ Desenvolvido por Raphael Robles - Stay hungry, stay foolish ! 🚀")
+
 
 
 
