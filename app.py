@@ -1,5 +1,4 @@
 
-
 # ============================================================
 # 📡 Endereços dos Sites RJ — OSM/OSRM Edition (100% gratuito)
 # - Geocoding: Geoapify (opcional, com key) → fallback Nominatim (sem key)
@@ -9,6 +8,7 @@
 # - Sem mensagens/diagnóstico na UI
 # - Corrige pd.NA em f-strings (sem usar `or` com pd.NA)
 # - Mantém toda a lógica de SIGLA e Acessos OK
+# - NOVO: Coluna 'CAPACITADO' na UI (badges) + banner automático em atualização da base
 # ============================================================
 
 import streamlit as st
@@ -19,6 +19,7 @@ import requests
 import numpy as np
 import math
 import re
+import os  # <-- NOVO
 from typing import List, Tuple
 
 # ------------------------------------------------------------
@@ -67,6 +68,58 @@ def fmt_na(x, dash="—"):
         return dash if (x is pd.NA or pd.isna(x)) else x
     except Exception:
         return dash if x is None else x
+
+# ------------------------------------------------------------
+# Helpers novos: yes/no normalização + badge + fingerprint
+# ------------------------------------------------------------
+YES_ALIASES = {"sim", "s", "yes", "y", "1", "true", "verdadeiro", "ok"}
+NO_ALIASES  = {"nao", "não", "n", "no", "0", "false", "falso"}
+
+def _to_str_lower(x):
+    try:
+        return strip_accents(str(x)).lower().strip()
+    except Exception:
+        return None
+
+def is_yes(val) -> bool | None:
+    """Retorna True/False/None a partir de variações de sim/não."""
+    if val is pd.NA or pd.isna(val):
+        return None
+    v = _to_str_lower(val)
+    if not v:
+        return None
+    if v in YES_ALIASES:
+        return True
+    if v in NO_ALIASES:
+        return False
+    return None
+
+def capacitado_badge(val) -> str:
+    yn = is_yes(val)
+    if yn is True:
+        return "✅ **Capacitado**"
+    if yn is False:
+        return "❌ **Não capacitado**"
+    return "—"
+
+def _file_fingerprint(path: str) -> str | None:
+    """Fingerprint simples por mtime e tamanho do arquivo."""
+    try:
+        stt = os.stat(path)
+        return f"{stt.st_mtime_ns}-{stt.st_size}"
+    except Exception:
+        return None
+
+BANNER_MSG = """# ============================================================
+# 📡 Endereços dos Sites RJ — OSM/OSRM Edition (100% gratuito)
+# - Geocoding: Geoapify (opcional, com key) → fallback Nominatim (sem key)
+# - Rotas/Matriz: OSRM (sem key) para distância/tempo por trajeto
+# - Detecção de cidade aprimorada (regex + fallback no endereço)
+# - Geocodificação robusta: normalização de entrada + duas tentativas no Nominatim
+# - Sem mensagens/diagnóstico na UI
+# - Corrige pd.NA em f-strings (sem usar `or` com pd.NA)
+# - Mantém toda a lógica de SIGLA e Acessos OK
+# ============================================================"""
 
 # ------------------------------------------------------------
 # Parâmetros regionais (viés RJ para Nominatim)
@@ -362,6 +415,13 @@ def carregar_dados():
     if "detentora" not in df.columns:
         df["detentora"] = pd.NA
 
+    # ------- NOVO: coluna 'capacitado' -------
+    if "capacitado" not in df.columns:
+        df["capacitado"] = pd.NA
+    else:
+        df["capacitado"] = df["capacitado"].astype("string").str.strip()
+    # ------- FIM NOVO -------
+
     return df
 
 # ------------------------------------------------------------
@@ -408,6 +468,20 @@ def carregar_acessos_ok():
 # ------------------------------------------------------------
 df = carregar_dados()
 ACESSOS_OK = carregar_acessos_ok()
+
+# ------------------------------------------------------------
+# Detector de atualização da base de dados (enderecos.xlsx)
+# ------------------------------------------------------------
+_curr_fp = _file_fingerprint("enderecos.xlsx")
+_prev_fp = st.session_state.get("enderecos_fp", None)
+
+if _prev_fp is None:
+    # Primeira carga: registra fingerprint mas não mostra banner
+    st.session_state["enderecos_fp"] = _curr_fp
+else:
+    if _curr_fp and _curr_fp != _prev_fp:
+        st.session_state["enderecos_fp"] = _curr_fp
+        st.info(f"**Base de dados atualizada!**\n\n```\n{BANNER_MSG}\n```")
 
 # ------------------------------------------------------------
 # UI
@@ -486,6 +560,7 @@ if endereco_filtro:
             st.markdown("### 📍 3 sites mais próximos (Quando disponível)")
             mostrar_cols = [c for c in [
                 "sigla", "nome", "detentora", "endereco", "lat", "lon",
+                "capacitado",  # <-- NOVO
                 "dist_km_linear", "dist_rodov_text", "duracao_text"
             ] if c in top3.columns]
             st.dataframe(
@@ -495,19 +570,21 @@ if endereco_filtro:
 
             # Cartões com links (Mapa e Rota) — sem usar `or` com pd.NA
             for _, row in top3.iterrows():
-                erb_lat, erb_lon = float(row["lat"]), float(row["lon"])
+                erb_lat, erb_lon = float(row["lat"]), float(row["lon"])]
                 maps_erb = f"https://www.google.com/maps/search/?api=1&query={erb_lat},{erb_lon}"
                 rota = f"https://www.google.com/maps/dir/?api=1&origin={lat_cli},{lon_cli}&destination={erb_lat},{erb_lon}&travelmode=driving"
 
                 dist_rodov_text = fmt_na(row.get("dist_rodov_text"))
                 duracao_text    = fmt_na(row.get("duracao_text"))
+                cap_badge       = capacitado_badge(row.get("capacitado"))
 
                 title = f"**{row.get('sigla', '—')} — {row.get('nome', '—')}**"
                 meta = (
                     f"🗺️ Linha reta: **{row['dist_km_linear']:.3f} km**  \n"
                     f"🚗 Rota: {dist_rodov_text}  \n"
                     f"⏱️ Tempo: {duracao_text}  \n"
-                    f"📌 Coords: {erb_lat:.6f}, {erb_lon:.6f}"
+                    f"📌 Coords: {erb_lat:.6f}, {erb_lon:.6f}  \n"
+                    f"🧰 {cap_badge}"
                 )
                 st.markdown(title + "  \n" + meta)
                 cols = st.columns(2)
@@ -533,8 +610,9 @@ else:
 
     st.success(f"🔎 {len(df_f)} site(s) encontrado(s).")
 
+    cols_sigla = [c for c in ["sigla", "cidade", "detentora", "nome", "endereco", "lat", "lon", "capacitado"] if c in df_f.columns]
     st.dataframe(
-        df_f[["sigla", "cidade", "detentora", "nome", "endereco", "lat", "lon"]],
+        df_f[cols_sigla],
         use_container_width=True
     )
 
@@ -554,10 +632,12 @@ else:
             st.link_button("🗺️ Ver no Google Maps", url, type="primary")
 
         det = row["detentora"] if pd.notna(row["detentora"]) else "—"
+        cap_badge_row = capacitado_badge(row.get("capacitado"))
         st.markdown(
             f"🏙️ **Cidade:** {row.get('cidade') or '—'}  \n"
             f"🏢 **Detentora:** {det}  \n"
-            f"📌 **Endereço:** {row['endereco']}"
+            f"📌 **Endereço:** {row['endereco']}  \n"
+            f"🧰 {cap_badge_row}"
         )
 
         tecnicos = tecnicos_por_sigla(row["sigla"])
