@@ -7,7 +7,9 @@
 # - Sem mensagens/diagnóstico na UI
 # - Corrige pd.NA em f-strings (sem usar `or` com pd.NA)
 # - Mantém toda a lógica de SIGLA e Acessos OK
-# - NOVO: Coluna 'CAPACITADO' na UI (badges), banner automático e Top3 sempre com o capacitado mais próximo
+# - NOVO: 'CAPACITADO' via coluna em 'enderecos' OU via aba separada (lista de SIGLAs)
+# - NOVO: Top3 sempre inclui o site capacitado mais próximo (se existir)
+# - NOVO: Banner automático quando a base muda
 # ============================================================
 
 import streamlit as st
@@ -18,7 +20,7 @@ import requests
 import numpy as np
 import math
 import re
-import os  # para fingerprint do arquivo
+import os
 from typing import List, Tuple
 
 # ------------------------------------------------------------
@@ -69,7 +71,7 @@ def fmt_na(x, dash="—"):
         return dash if x is None else x
 
 # ------------------------------------------------------------
-# Helpers novos: yes/no normalização + badge + fingerprint
+# Helpers: yes/no normalização + badge + fingerprint
 # ------------------------------------------------------------
 YES_ALIASES = {"sim", "s", "yes", "y", "1", "true", "verdadeiro", "ok"}
 NO_ALIASES  = {"nao", "não", "n", "no", "0", "false", "falso"}
@@ -123,7 +125,6 @@ BANNER_MSG = """# ============================================================
 # ------------------------------------------------------------
 # Parâmetros regionais (viés RJ para Nominatim)
 # ------------------------------------------------------------
-# viewbox para Nominatim (lon_min, lat_min, lon_max, lat_max)
 RJ_VIEWBOX = (-43.8, -23.1, -43.0, -22.7)  # melhora match no RJ
 
 # ------------------------------------------------------------
@@ -152,7 +153,6 @@ MUNI_IDX = {strip_accents(n).lower(): n for n in MUNICIPIOS_RJ}
 _CITY_PATTERNS = {key: re.compile(rf"\b{re.escape(key)}\b") for key in MUNI_IDX.keys()}
 
 def _match_city_base(texto: str) -> str | None:
-    """Tenta casar município num texto (normalizado sem acentos e lower)."""
     if not isinstance(texto, str) or not texto.strip():
         return None
     base = strip_accents(texto).lower()
@@ -163,10 +163,6 @@ def _match_city_base(texto: str) -> str | None:
     return ultimo
 
 def detectar_cidade(nome: str, endereco: str | None = None) -> str | None:
-    """
-    1) Tenta identificar o município no 'nome'
-    2) Se não achou, tenta no 'endereco'
-    """
     city = _match_city_base(nome)
     if city:
         return city
@@ -178,43 +174,24 @@ def detectar_cidade(nome: str, endereco: str | None = None) -> str | None:
 # Geocoding — normalização do endereço + Geoapify (opcional) + Nominatim (duas tentativas)
 # ------------------------------------------------------------
 def _normalize_address_for_br(addr: str) -> str:
-    """
-    Se o usuário digitar algo muito curto/sem país/UF, acrescenta 'RJ, Brasil' ou 'Brasil'.
-    - Se já houver 'RJ'/'Brasil', mantém.
-    """
     if not isinstance(addr, str):
         return addr
     a = addr.strip()
     a_low = strip_accents(a).lower()
     if (" rj" in a_low) or (" rio de janeiro" in a_low) or (" brasil" in a_low) or (" brazil" in a_low):
         return a
-    # heurística simples: se só tem 1 parte (sem vírgula), completar com RJ e Brasil
     if len(a.split(",")) == 1:
         return f"{a}, RJ, Brasil"
-    # senão, ao menos assegura Brasil
     return f"{a}, Brasil"
 
 @st.cache_data(show_spinner=False, ttl=60*60)
 def geocode_geoapify(address: str):
-    """
-    Geocodifica um endereço usando Geoapify (se GEOAPIFY_KEY estiver configurada).
-    Retorna (result, dbg):
-      result: {'lat', 'lon', 'formatted'} ou None
-      dbg:    {'provider','status','error_message','raw_sample'}
-    """
     dbg = {"provider": "geoapify", "status": None, "error_message": None, "raw_sample": None}
     if not GEOAPIFY_KEY or not address or not address.strip():
         dbg["status"] = "MISSING_KEY_OR_ADDRESS"
         return None, dbg
-
     url = "https://api.geoapify.com/v1/geocode/search"
-    params = {
-        "text": address,
-        "lang": "pt",
-        "filter": "countrycode:br",
-        "limit": 1,
-        "apiKey": GEOAPIFY_KEY
-    }
+    params = {"text": address, "lang": "pt", "filter": "countrycode:br", "limit": 1, "apiKey": GEOAPIFY_KEY}
     try:
         r = requests.get(url, params=params, timeout=10)
         r.raise_for_status()
@@ -226,133 +203,76 @@ def geocode_geoapify(address: str):
         p = feats[0]["properties"]
         dbg["status"] = "OK"
         dbg["raw_sample"] = {"formatted": p.get("formatted")}
-        return {
-            "lat": float(p["lat"]),
-            "lon": float(p["lon"]),
-            "formatted": p.get("formatted") or address
-        }, dbg
+        return {"lat": float(p["lat"]), "lon": float(p["lon"]), "formatted": p.get("formatted") or address}, dbg
     except requests.exceptions.Timeout:
         dbg["status"] = "TIMEOUT"
         return None, dbg
     except Exception as e:
-        dbg["status"] = "EXCEPTION"
-        dbg["error_message"] = str(e)
+        dbg["status"] = "EXCEPTION"; dbg["error_message"] = str(e)
         return None, dbg
 
 @st.cache_data(show_spinner=False, ttl=60*60)
 def geocode_nominatim(address: str, strict_rj: bool = True):
-    """
-    Nominatim (OSM) com duas modalidades:
-      - strict_rj=True  -> usa viewbox do RJ (bounded=1)
-      - strict_rj=False -> remove bounded e busca no Brasil todo
-    Retorna (result, dbg).
-    """
     dbg = {"provider": "nominatim", "status": None, "error_message": None, "raw_sample": None}
     address = _normalize_address_for_br(address)
     if not address or not address.strip():
         dbg["status"] = "MISSING_ADDRESS"
         return None, dbg
     try:
-        time.sleep(1.0)  # respeita limites do serviço público
-        params = {
-            "q": address,
-            "format": "json",
-            "limit": 1,
-            "countrycodes": "br",
-            "accept-language": "pt-BR",
-        }
+        time.sleep(1.0)
+        params = {"q": address, "format": "json", "limit": 1, "countrycodes": "br", "accept-language": "pt-BR"}
         headers = {"User-Agent": "busca-sites-b2b/1.0 (contato: seu-email@exemplo.com)"}
         if strict_rj:
-            params.update({
-                "viewbox": f"{RJ_VIEWBOX[0]},{RJ_VIEWBOX[1]},{RJ_VIEWBOX[2]},{RJ_VIEWBOX[3]}",
-                "bounded": 1
-            })
+            params.update({"viewbox": f"{RJ_VIEWBOX[0]},{RJ_VIEWBOX[1]},{RJ_VIEWBOX[2]},{RJ_VIEWBOX[3]}", "bounded": 1})
         r = requests.get("https://nominatim.openstreetmap.org/search", params=params, headers=headers, timeout=10)
         j = r.json()
         if j:
             item = j[0]
-            dbg["status"] = "OK"
-            dbg["raw_sample"] = {"display_name": item.get("display_name")}
-            return {
-                "lat": float(item["lat"]),
-                "lon": float(item["lon"]),
-                "formatted": item.get("display_name")
-            }, dbg
+            dbg["status"] = "OK"; dbg["raw_sample"] = {"display_name": item.get("display_name")}
+            return {"lat": float(item["lat"]), "lon": float(item["lon"]), "formatted": item.get("display_name")}, dbg
         else:
             dbg["status"] = "ZERO_RESULTS"
             return None, dbg
     except requests.exceptions.Timeout:
-        dbg["status"] = "TIMEOUT"
-        return None, dbg
+        dbg["status"] = "TIMEOUT"; return None, dbg
     except Exception as e:
-        dbg["status"] = "EXCEPTION"
-        dbg["error_message"] = str(e)
-        return None, dbg
+        dbg["status"] = "EXCEPTION"; dbg["error_message"] = str(e); return None, dbg
 
 def geocode_address(address: str):
-    """
-    Ordem:
-      1) Geoapify (se key)
-      2) Nominatim com viés RJ estrito
-      3) Nominatim sem bounded (apenas BR)
-    """
     if GEOAPIFY_KEY:
         res, dbg = geocode_geoapify(address)
-        if res:
-            return res, dbg
+        if res: return res, dbg
     res2, dbg2 = geocode_nominatim(address, strict_rj=True)
-    if res2:
-        return res2, dbg2
+    if res2: return res2, dbg2
     res3, dbg3 = geocode_nominatim(address, strict_rj=False)
-    if res3:
-        return res3, dbg3
+    if res3: return res3, dbg3
     return None, {"provider": "none", "status": "ZERO_RESULTS", "error_message": None}
 
 # ------------------------------------------------------------
-# Rotas/Matriz — OSRM (sem key)
+# OSRM Table — distância/tempo
 # ------------------------------------------------------------
 @st.cache_data(show_spinner=False, ttl=15*60)
 def osrm_table(origin_lat: float, origin_lon: float, dests: List[Tuple[float, float]]):
-    """
-    Usa OSRM Table API (router.project-osrm.org) para obter duration/distance.
-    dests: lista [(lat, lon), ...]
-    Retorna (out, dbg):
-      out: [{'distance_m','distance_text','duration_s','duration_text'}, ...]
-      dbg: {'status','error_message'}
-    """
     dbg = {"status": None, "error_message": None}
     if not dests:
-        dbg["status"] = "NO_DESTS"
-        return [], dbg
-
-    # OSRM usa ordem lon,lat
-    coords = [(origin_lon, origin_lat)] + [(lon, lat) for (lat, lon) in dests]
+        dbg["status"] = "NO_DESTS"; return [], dbg
+    coords = [(origin_lon, origin_lat)] + [(lon, lat) for (lat, lon) in dests]  # ordem OSRM: lon,lat
     coord_str = ";".join([f"{lon},{lat}" for (lon, lat) in coords])
     url = f"https://router.project-osrm.org/table/v1/driving/{coord_str}"
     params = {"annotations": "duration,distance"}
-
     try:
         r = requests.get(url, params=params, timeout=10)
         r.raise_for_status()
         data = r.json()
         dbg["status"] = data.get("code", "OK")
-
         if data.get("code") != "Ok":
-            dbg["error_message"] = data.get("message")
-            return [], dbg
-
-        durations = data.get("durations") or []
-        distances = data.get("distances") or []
-        if not durations or not distances:
-            return [], dbg
-
-        row0_dur = durations[0]  # origem -> todos
-        row0_dis = distances[0]
-
+            dbg["error_message"] = data.get("message"); return [], dbg
+        durations = data.get("durations") or []; distances = data.get("distances") or []
+        if not durations or not distances: return [], dbg
+        row0_dur = durations[0]; row0_dis = distances[0]
         out = []
         for i in range(1, len(row0_dur)):
-            dur = row0_dur[i]
-            dist = row0_dis[i]
+            dur = row0_dur[i]; dist = row0_dis[i]
             out.append({
                 "distance_m": None if dist is None else float(dist),
                 "distance_text": None if dist is None else f"{dist/1000:.1f} km",
@@ -361,28 +281,17 @@ def osrm_table(origin_lat: float, origin_lon: float, dests: List[Tuple[float, fl
             })
         return out, dbg
     except requests.exceptions.Timeout:
-        dbg["status"] = "TIMEOUT"
-        return [], dbg
+        dbg["status"] = "TIMEOUT"; return [], dbg
     except Exception as e:
-        dbg["status"] = "EXCEPTION"
-        dbg["error_message"] = str(e)
-        return [], dbg
+        dbg["status"] = "EXCEPTION"; dbg["error_message"] = str(e); return [], dbg
 
 # ------------------------------------------------------------
 # Dados principais (aba: enderecos)
 # ------------------------------------------------------------
 @st.cache_data(show_spinner=False)
 def carregar_dados():
-    df = pd.read_excel(
-        "enderecos.xlsx",
-        sheet_name="enderecos",  # <- sua aba real
-        engine="openpyxl",
-    )
-
-    # padronizar nomes de colunas
+    df = pd.read_excel("enderecos.xlsx", sheet_name="enderecos", engine="openpyxl")
     df.columns = df.columns.str.strip().str.lower()
-
-    # renomear para padrão interno
     df = df.rename(columns={
         "sigla_da_torre": "sigla",
         "nome_da_torre": "nome",
@@ -390,13 +299,9 @@ def carregar_dados():
         "latitude": "lat",
         "longitude": "lon",
     })
-
-    # normalização textual
     for col in ["sigla", "nome", "endereco", "detentora"]:
         if col in df.columns:
             df[col] = df[col].astype("string").str.strip()
-
-    # coordenadas com ponto
     for col in ["lat", "lon"]:
         if col in df.columns:
             df[col] = (
@@ -405,19 +310,64 @@ def carregar_dados():
                 .replace("", pd.NA)
                 .astype(float)
             )
-
-    # garantir detentora
     if "detentora" not in df.columns:
         df["detentora"] = pd.NA
-
-    # ------- NOVO: coluna 'capacitado' -------
-    if "capacitado" not in df.columns:
-        df["capacitado"] = pd.NA
-    else:
+    # Se existir 'capacitado' na própria aba, apenas padroniza texto
+    if "capacitado" in df.columns:
         df["capacitado"] = df["capacitado"].astype("string").str.strip()
-    # ------- FIM NOVO -------
-
     return df
+
+# ------------------------------------------------------------
+# Aba "capacitados" (opcional, SIGLAs capacitados) — SUPORTE NOVO
+# ------------------------------------------------------------
+@st.cache_data(show_spinner=False)
+def carregar_capacitados_lista():
+    """
+    Procura por uma aba que liste SIGLAs capacitados. Aceita nomes comuns:
+    'capacitados', 'capacitacao', 'cap_ativos'.
+    Aceita colunas: 'sigla' (ou equivalentes) e opcional 'capacitado/status/ativo'.
+    Se não houver coluna de status, assume que TODAS as SIGLAs listadas são 'SIM'.
+    Retorna: set de SIGLAs (uppercase) capacitados. Ou None se não houver aba válida.
+    """
+    candidate_sheets = ["capacitados", "capacitacao", "cap_ativos"]
+    wb_path = "enderecos.xlsx"
+    for sh in candidate_sheets:
+        try:
+            dfc = pd.read_excel(wb_path, sheet_name=sh, engine="openpyxl")
+            if dfc is None or dfc.empty:
+                continue
+            dfc.columns = dfc.columns.str.strip().str.lower()
+
+            # Detecta coluna de SIGLA
+            sigla_col = None
+            for alt in ["sigla", "sigla_da_torre", "site", "torre"]:
+                if alt in dfc.columns:
+                    sigla_col = alt
+                    break
+            if not sigla_col:
+                continue
+
+            # Detecta coluna de status (opcional)
+            status_col = None
+            for alt in ["capacitado", "status", "ativo", "habilitado"]:
+                if alt in dfc.columns:
+                    status_col = alt
+                    break
+
+            dfc = dfc.dropna(subset=[sigla_col]).copy()
+            dfc[sigla_col] = dfc[sigla_col].astype("string").str.strip()
+
+            if status_col:
+                mask_ok = dfc[status_col].apply(is_yes) == True
+                siglas_ok = dfc.loc[mask_ok, sigla_col].astype(str).str.upper().unique().tolist()
+            else:
+                siglas_ok = dfc[sigla_col].astype(str).str.upper().unique().tolist()
+
+            return set(siglas_ok) if siglas_ok else set()
+        except Exception:
+            # tenta próxima aba
+            continue
+    return None
 
 # ------------------------------------------------------------
 # Aba "acessos" (técnicos com status ok)
@@ -428,7 +378,6 @@ def carregar_acessos_ok():
         acc = pd.read_excel("enderecos.xlsx", sheet_name="acessos", engine="openpyxl")
     except Exception:
         return None
-
     acc.columns = acc.columns.str.strip().str.lower()
 
     if "tecnico" not in acc.columns:
@@ -443,7 +392,6 @@ def carregar_acessos_ok():
                 acc = acc.rename(columns={alt: "sigla"})
                 break
 
-    # checagem mínima
     if "sigla" not in acc.columns or "tecnico" not in acc.columns:
         return None
 
@@ -455,13 +403,43 @@ def carregar_acessos_ok():
 
     def norm(x): return strip_accents(str(x)).lower()
     acc = acc[acc["status"].apply(norm) == "ok"]
-
     return acc.reset_index(drop=True)
+
+# ------------------------------------------------------------
+# Unificação do status 'capacitado' (coluna local OU aba separada)
+# ------------------------------------------------------------
+def unificar_capacitado(df: pd.DataFrame, siglas_cap_set: set | None):
+    """
+    Garante que df tenha:
+      - df['capacitado'] -> para exibição ("SIM"/"NÃO"/NA)
+      - df['_is_capacitado'] -> booleano para lógica
+    Regras:
+      a) Se df já tem 'capacitado', usa is_yes() sobre ela.
+      b) Senão, se siglas_cap_set existir, marca 'SIM' para quem está no set; 'NÃO' para os demais.
+      c) Se nada disponível, deixa como NA/False.
+    """
+    df = df.copy()
+    if "capacitado" in df.columns:
+        df["capacitado"] = df["capacitado"].astype("string").str.strip()
+        df["_is_capacitado"] = df["capacitado"].apply(is_yes) == True
+        # Normaliza exibição para "SIM"/"NÃO"/NA sem alterar planilha
+        df["capacitado"] = df["_is_capacitado"].map({True: "SIM", False: "NÃO"}).astype("string")
+    elif siglas_cap_set is not None:
+        siglas_upper = df["sigla"].astype(str).str.upper()
+        is_cap = siglas_upper.isin(siglas_cap_set)
+        df["_is_capacitado"] = is_cap
+        df["capacitado"] = is_cap.map({True: "SIM", False: "NÃO"}).astype("string")
+    else:
+        df["_is_capacitado"] = False
+        df["capacitado"] = pd.NA
+    return df
 
 # ------------------------------------------------------------
 # Carregar bases
 # ------------------------------------------------------------
-df = carregar_dados()
+df_raw = carregar_dados()
+siglas_cap_set = carregar_capacitados_lista()  # pode ser None
+df = unificar_capacitado(df_raw, siglas_cap_set)
 ACESSOS_OK = carregar_acessos_ok()
 
 # ------------------------------------------------------------
@@ -469,9 +447,7 @@ ACESSOS_OK = carregar_acessos_ok()
 # ------------------------------------------------------------
 _curr_fp = _file_fingerprint("enderecos.xlsx")
 _prev_fp = st.session_state.get("enderecos_fp", None)
-
 if _prev_fp is None:
-    # Primeira carga: registra fingerprint mas não mostra banner
     st.session_state["enderecos_fp"] = _curr_fp
 else:
     if _curr_fp and _curr_fp != _prev_fp:
@@ -487,29 +463,23 @@ if st.button("🔄 Atualizar dados (limpar cache)"):
     st.cache_data.clear()
     _rerun()
 
-# -------------------- BUSCA POR SIGLA (existente) --------------------
+# -------------------- BUSCA POR SIGLA --------------------
 with st.form("form_sigla", clear_on_submit=False):
     sigla = st.text_input("🔍 Buscar por SIGLA:")
     submitted = st.form_submit_button("OK")
-
 if submitted:
     st.session_state["sigla"] = sigla
-
 sigla_filtro = st.session_state.get("sigla", "")
 
-# -------------------- BUSCA POR ENDEREÇO (sem diagnóstico) ----------
+# -------------------- BUSCA POR ENDEREÇO -----------------
 st.markdown("---")
 st.subheader("🧭 Buscar por ENDEREÇO do cliente → 3 sites mais próximos")
 
 with st.form("form_endereco", clear_on_submit=False):
-    endereco_cliente = st.text_input(
-        "Digite o endereço completo (rua, número, bairro, cidade — RJ de preferência)"
-    )
+    endereco_cliente = st.text_input("Digite o endereço completo (rua, número, bairro, cidade — RJ de preferência)")
     submitted_endereco = st.form_submit_button("Buscar sites")
-
 if submitted_endereco:
     st.session_state["endereco_cliente"] = endereco_cliente
-
 endereco_filtro = st.session_state.get("endereco_cliente", "")
 
 if endereco_filtro:
@@ -522,76 +492,58 @@ if endereco_filtro:
     else:
         lat_cli, lon_cli = geo["lat"], geo["lon"]
         st.success("✅ Endereço localizado:")
-        st.markdown(
-            f"**{geo['formatted']}**  \n"
-            f"🧭 **Coordenadas**: {lat_cli:.6f}, {lon_cli:.6f}"
-        )
+        st.markdown(f"**{geo['formatted']}**  \n🧭 **Coordenadas**: {lat_cli:.6f}, {lon_cli:.6f}")
 
-        # Filtra ERBs com coordenadas válidas
         base = df.dropna(subset=["lat", "lon"]).copy()
         if base.empty:
             st.warning("⚠️ Nenhuma ERB na planilha possui coordenadas válidas.")
         else:
-            # Distância em linha reta para todas as ERBs
             base["dist_km_linear"] = haversine_km(lat_cli, lon_cli, base["lat"].values, base["lon"].values)
 
-            # 1) Top 3 normal
+            # 1) Top3 normal
             top3 = base.nsmallest(3, "dist_km_linear").copy()
 
-            # 2) Encontrar o site capacitado mais próximo
-            base_cap = base[base["capacitado"].apply(is_yes) == True].copy()
+            # 2) Capacitado mais próximo (se houver)
+            base_cap = base[base["_is_capacitado"] == True].copy()
             forced_cap_row = None
             if not base_cap.empty:
                 idx_min_cap = base_cap["dist_km_linear"].idxmin()
-                forced_cap_row = base_cap.loc[[idx_min_cap]].copy()  # DataFrame com 1 linha
+                forced_cap_row = base_cap.loc[[idx_min_cap]].copy()
 
-            # 3) Forçar inclusão do capacitado mais próximo no Top 3
+            # 3) Forçar inclusão do capacitado mais próximo
             if forced_cap_row is not None:
-                # Se a SIGLA do capacitado mais próximo não está no top3, incluir e limitar a 3 itens
                 if forced_cap_row.iloc[0]["sigla"] not in top3["sigla"].astype(str).tolist():
                     union_df = pd.concat([top3, forced_cap_row], ignore_index=True)
-
-                    # Ordena por distância e remove duplicatas por SIGLA (mantendo o mais próximo)
                     union_df = union_df.sort_values("dist_km_linear", ascending=True)
                     union_df = union_df.drop_duplicates(subset=["sigla"], keep="first")
-
-                    # Se ainda tiver mais que 3, garantir que a linha capacitada fique presente:
                     if len(union_df) > 3:
-                        # Se a linha capacitada NÃO está no top3 após ordenação, forçar presença:
                         sigla_cap = forced_cap_row.iloc[0]["sigla"]
                         first3 = union_df.head(3)
                         if sigla_cap not in first3["sigla"].astype(str).tolist():
-                            # Pegar os 2 primeiros + a linha capacitada
-                            # (removendo se por acaso já duplicou)
                             union_df = pd.concat([union_df.head(2), forced_cap_row], ignore_index=True)
-                            # Ordena de novo apenas para manter coerência visual
+                            union_df = union_df.drop_duplicates(subset=["sigla"], keep="first")
                             union_df = union_df.sort_values("dist_km_linear", ascending=True)
-                    # Limita a 3 final
                     top3 = union_df.head(3).reset_index(drop=True)
                 else:
-                    # Já estava no top3 — apenas garantir ordenação por distância
                     top3 = top3.sort_values("dist_km_linear", ascending=True).reset_index(drop=True)
             else:
-                # Não há capacitados na base — segue o top3 normal
                 top3 = top3.sort_values("dist_km_linear", ascending=True).reset_index(drop=True)
 
-            # OSRM: origem -> destinos top3
+            # OSRM
             dm_out, dm_dbg = osrm_table(
                 lat_cli, lon_cli,
                 [(float(r["lat"]), float(r["lon"])) for _, r in top3.iterrows()]
             )
-
             if dm_out and len(dm_out) == len(top3) and (dm_dbg.get("status") in ("Ok", "OK", None)):
                 top3["dist_rodov_text"] = [x["distance_text"] for x in dm_out]
                 top3["duracao_text"]    = [x["duration_text"] for x in dm_out]
                 top3["duracao_s"]       = [x["duration_s"] for x in dm_out]
             else:
-                # Mantém a UI estável mesmo se OSRM falhar
                 top3["dist_rodov_text"] = pd.NA
                 top3["duracao_text"]    = pd.NA
                 top3["duracao_s"]       = pd.NA
 
-            st.markdown("### 📍 3 sites mais próximos (com priorização de capacitado mais próximo)")
+            st.markdown("### 📍 3 sites mais próximos (priorizando o capacitado mais próximo)")
             mostrar_cols = [c for c in [
                 "sigla", "nome", "detentora", "endereco", "lat", "lon",
                 "capacitado",
@@ -602,7 +554,7 @@ if endereco_filtro:
                 use_container_width=True
             )
 
-            # Cartões com links (Mapa e Rota)
+            # Cartões
             for _, row in top3.iterrows():
                 erb_lat, erb_lon = float(row["lat"]), float(row["lon"])
                 maps_erb = f"https://www.google.com/maps/search/?api=1&query={erb_lat},{erb_lon}"
@@ -630,7 +582,7 @@ if endereco_filtro:
 
 st.markdown("---")
 
-# -------------------- RESULTADO DA BUSCA POR SIGLA (existente) --------------------
+# -------------------- RESULTADO DA BUSCA POR SIGLA --------------------
 if sigla_filtro:
     df_f = df[df["sigla"].astype(str).str.upper() == str(sigla_filtro).upper()].copy()
 else:
@@ -639,16 +591,11 @@ else:
 if df_f.empty:
     st.warning("⚠️ Nenhum site encontrado.")
 else:
-    # Detecção de cidade aprimorada: tenta no 'nome' e, se não, no 'endereco'
     df_f["cidade"] = df_f.apply(lambda r: detectar_cidade(r.get("nome"), r.get("endereco")), axis=1)
-
     st.success(f"🔎 {len(df_f)} site(s) encontrado(s).")
 
     cols_sigla = [c for c in ["sigla", "cidade", "detentora", "nome", "endereco", "lat", "lon", "capacitado"] if c in df_f.columns]
-    st.dataframe(
-        df_f[cols_sigla],
-        use_container_width=True
-    )
+    st.dataframe(df_f[cols_sigla], use_container_width=True)
 
     st.markdown("### 📍 Detalhes do(s) site(s) encontrado(s)")
 
