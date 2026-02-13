@@ -481,7 +481,7 @@ if st.button("🔄 Atualizar dados (limpar cache)"):
 
 # ============================================================
 # -------------------- BUSCA POR SIGLA -----------------------
-# (Autocomplete clicável em chips + fuzzy; OK executa busca)
+# (Chips clicáveis que executam busca + fuzzy; OK também executa)
 # ============================================================
 st.markdown("---")
 st.subheader("🔍 Buscar por SIGLA")
@@ -497,6 +497,9 @@ if "busca_sigla_input" not in st.session_state:
 # Se um chip foi clicado, no ciclo anterior guardamos em 'pending':
 if "busca_sigla_pending" in st.session_state:
     st.session_state["busca_sigla_input"] = st.session_state.pop("busca_sigla_pending")
+
+# Se foi solicitado auto-executar a busca (por clique no chip), consome o flag aqui
+auto_trigger = st.session_state.pop("do_busca_sigla", False)
 
 # ---------- Auxiliares (fuzzy + sugestões) ----------
 def _levenshtein(a: str, b: str) -> int:
@@ -548,15 +551,16 @@ def _gerar_sugestoes(busca_raw: str, candidatos: list[str], limite: int = 8) -> 
 
     return pref[:limite]
 
-# Callback dos chips: salva em "pending" (não escreve no key do widget)
+# Callback dos chips: salva em "pending" e sinaliza auto-busca
 def _select_sugestao(value: str):
     st.session_state["busca_sigla_pending"] = value
+    st.session_state["do_busca_sigla"] = True
     # O clique no botão já dispara um rerun automaticamente.
 
-# ---------- Form: apenas o OK submete ----------
+# ---------- Form: o OK também segue funcionando ----------
 with st.form("form_sigla", clear_on_submit=False):
     busca = st.text_input(
-        "Digite a sigla do site/ERB.",
+        "Digite a sigla (aceita RJDJU, rj-dju, rj dju...)",
         key="busca_sigla_input"
     )
     submitted = st.form_submit_button("OK")
@@ -611,7 +615,7 @@ st.markdown("""
 if busca:
     sugestoes = _gerar_sugestoes(busca, lista_siglas, limite=8)
     if sugestoes:
-        st.markdown("### 🔎 Sugestões (clique para preencher)")
+        st.markdown("### 🔎 Sugestões (clique para buscar)")
         st.markdown('<div id="chips-scope">', unsafe_allow_html=True)
 
         cols = st.columns(max(2, min(6, len(sugestoes))))
@@ -627,9 +631,11 @@ if busca:
     else:
         st.markdown("Nenhuma sugestão encontrada.")
 
-# ---------- Executa busca apenas ao clicar em OK ----------
-if submitted and (busca or st.session_state.get("busca_sigla_input")):
-    busca_val = busca if busca else st.session_state.get("busca_sigla_input", "")
+# ---------- Executa busca se OK foi clicado OU se veio de um chip ----------
+should_search = submitted or auto_trigger
+
+if should_search and (busca or st.session_state.get("busca_sigla_input")):
+    busca_val = st.session_state.get("busca_sigla_input", "")
     busca_norm = normalizar_sigla(busca_val)
 
     # 1) Match exato (normalizado)
@@ -811,6 +817,7 @@ else:
 st.caption("❤️ Desenvolvido por Raphael Robles - Stay hungry, stay foolish ! 🚀")
 
  
+
 
 
 
