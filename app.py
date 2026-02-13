@@ -481,7 +481,7 @@ if st.button("🔄 Atualizar dados (limpar cache)"):
     st.cache_data.clear()
     _rerun()
 
-# -------------------- BUSCA POR SIGLA (Autocomplete visual + OK) --------------------
+# -------------------- BUSCA POR SIGLA (Autocomplete clicável + OK) --------------------
  
 st.markdown("---")
 st.subheader("🔍 Buscar por SIGLA")
@@ -490,14 +490,18 @@ lista_siglas = sorted(
     df["sigla"].dropna().astype(str).str.upper().unique().tolist()
 )
  
+# mantém valor selecionado
+if "busca_sigla" not in st.session_state:
+    st.session_state["busca_sigla"] = ""
+ 
 with st.form("form_sigla", clear_on_submit=False):
  
     busca = st.text_input(
-        "Digite a sigla (aceita RJDJU, rj-dju, rj dju...)",
+        "Digite a sigla do site.",
         key="busca_sigla"
     )
  
-    # AUTOCOMPLETE VISUAL (apenas sugestão, não executa busca ainda)
+    # AUTOCOMPLETE VISUAL CLICÁVEL
     if busca:
         busca_norm = normalizar_sigla(busca)
  
@@ -508,17 +512,19 @@ with st.form("form_sigla", clear_on_submit=False):
  
         if sugestoes:
             st.markdown("### 🔎 Sugestões")
-            for s in sugestoes[:5]:
-                st.markdown(f"• {s}")
-        else:
-            st.markdown("Nenhuma sugestão encontrada.")
+            cols = st.columns(min(len(sugestoes[:5]), 5))
+ 
+            for i, s in enumerate(sugestoes[:5]):
+                if cols[i].button(s, key=f"sug_{s}"):
+                    st.session_state["busca_sigla"] = s
+                    st.rerun()
  
     submitted = st.form_submit_button("OK")
  
-# EXECUTA BUSCA APENAS AO CLICAR NO OK
-if submitted and busca:
+# EXECUTA BUSCA SOMENTE AO CLICAR OK
+if submitted and st.session_state["busca_sigla"]:
  
-    busca_norm = normalizar_sigla(busca)
+    busca_norm = normalizar_sigla(st.session_state["busca_sigla"])
  
     sigla_encontrada = None
     for s in lista_siglas:
@@ -691,6 +697,7 @@ else:
 st.caption("❤️ Desenvolvido por Raphael Robles - Stay hungry, stay foolish ! 🚀")
 
  
+
 
 
 
