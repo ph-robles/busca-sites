@@ -481,59 +481,117 @@ if st.button("🔄 Atualizar dados (limpar cache)"):
     st.cache_data.clear()
     _rerun()
 
-# -------------------- BUSCA POR SIGLA (Autocomplete visual + OK) --------------------
- 
+# -------------------- BUSCA POR SIGLA (Autocomplete clicável + fuzzy, OK é quem busca) --------------------
+
 st.markdown("---")
 st.subheader("🔍 Buscar por SIGLA")
- 
+
 lista_siglas = sorted(
     df["sigla"].dropna().astype(str).str.upper().unique().tolist()
 )
- 
+
+# Mapa auxiliar: normalizado -> original
+_norm_map = {s: normalizar_sigla(s) for s in lista_siglas}
+
 with st.form("form_sigla", clear_on_submit=False):
- 
     busca = st.text_input(
         "Digite a sigla (aceita RJDJU, rj-dju, rj dju...)",
         key="busca_sigla"
     )
- 
-    # AUTOCOMPLETE VISUAL (apenas sugestão, não executa busca ainda)
-    if busca:
-        busca_norm = normalizar_sigla(busca)
- 
-        sugestoes = [
-            s for s in lista_siglas
-            if normalizar_sigla(s).startswith(busca_norm)
-        ]
- 
-        if sugestoes:
-            st.markdown("### 🔎 Sugestões")
-            for s in sugestoes[:5]:
-                st.markdown(f"• {s}")
-        else:
-            st.markdown("Nenhuma sugestão encontrada.")
- 
     submitted = st.form_submit_button("OK")
- 
-# EXECUTA BUSCA APENAS AO CLICAR NO OK
-if submitted and busca:
- 
-    busca_norm = normalizar_sigla(busca)
- 
+
+# ===== SUGESTÕES CLICÁVEIS (FORA DO FORM) =====
+def _levenshtein(a: str, b: str) -> int:
+    """Distância de edição (inserção/remoção/substituição)."""
+    if a == b:
+        return 0
+    if not a:
+        return len(b)
+    if not b:
+        return len(a)
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        curr = [i]
+        for j, cb in enumerate(b, 1):
+            ins = prev[j] + 1
+            dele = curr[j - 1] + 1
+            sub = prev[j - 1] + (ca != cb)
+            curr.append(min(ins, dele, sub))
+        prev = curr
+    return prev[-1]
+
+def _gerar_sugestoes(busca_raw: str, candidatos: list[str], limite: int = 5) -> list[str]:
+    if not busca_raw:
+        return []
+    bn = normalizar_sigla(busca_raw)
+
+    pares = [(s, normalizar_sigla(s)) for s in candidatos]
+
+    # 1) Começa com...
+    pref = [s for s, n in pares if n.startswith(bn)]
+    seen = set(pref)
+
+    # 2) Contém...
+    if len(pref) < limite:
+        substr = [s for s, n in pares if (bn in n) and (s not in seen)]
+        pref.extend(substr)
+        seen.update(substr)
+
+    # 3) Fuzzy leve (distância <= 1)
+    if len(pref) < limite:
+        fuzzy = []
+        for s, n in pares:
+            if s in seen:
+                continue
+            d = _levenshtein(n, bn)
+            if d <= 1:
+                fuzzy.append((d, s))
+        fuzzy = [s for _, s in sorted(fuzzy, key=lambda x: (x[0], x[1]))]
+        pref.extend(fuzzy)
+
+    return pref[:limite]
+
+# Renderiza sugestões como botões "chips"
+if busca:
+    sugestoes = _gerar_sugestoes(busca, lista_siglas, limite=5)
+    if sugestoes:
+        st.markdown("### 🔎 Sugestões (clique para preencher)")
+        cols = st.columns(max(1, min(5, len(sugestoes))))
+        for i, s in enumerate(sugestoes):
+            with cols[i % len(cols)]:
+                if st.button(s, key=f"sug_{s}"):
+                    # Preenche o campo de texto e reroda, sem submeter
+                    st.session_state["busca_sigla"] = s
+                    _rerun()
+    else:
+        st.markdown("Nenhuma sugestão encontrada.")
+
+# ===== EXECUTA BUSCA APENAS AO CLICAR EM OK =====
+if submitted and (busca or st.session_state.get("busca_sigla")):
+    busca_val = busca if busca else st.session_state.get("busca_sigla")
+    busca_norm = normalizar_sigla(busca_val)
+
+    # 1) Match exato (normalizado)
     sigla_encontrada = None
     for s in lista_siglas:
         if normalizar_sigla(s) == busca_norm:
             sigla_encontrada = s
             break
- 
+
+    # 2) Fuzzy leve (<= 1 erro) se não achou exato
+    if sigla_encontrada is None:
+        dists = [(s, _levenshtein(normalizar_sigla(s), busca_norm)) for s in lista_siglas]
+        s_best, d_best = min(dists, key=lambda x: x[1]) if dists else (None, 999)
+        if d_best <= 1:
+            sigla_encontrada = s_best
+
     if sigla_encontrada:
-        df_f = df[
-            df["sigla"].astype(str).str.upper() == sigla_encontrada
-        ].copy()
+        df_f = df[df["sigla"].astype(str).str.upper() == sigla_encontrada].copy()
     else:
         df_f = pd.DataFrame()
 else:
     df_f = pd.DataFrame()
+
 
 # -------------------- BUSCA POR ENDEREÇO -----------------
 st.markdown("---")
@@ -690,6 +748,7 @@ else:
 st.caption("❤️ Desenvolvido por Raphael Robles - Stay hungry, stay foolish ! 🚀")
 
  
+
 
 
 
