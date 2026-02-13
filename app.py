@@ -556,7 +556,7 @@ def _select_sugestao(value: str):
 # ---------- Form: apenas o OK submete ----------
 with st.form("form_sigla", clear_on_submit=False):
     busca = st.text_input(
-        "Digite a sigla (aceita RJDJU, rj-dju, rj dju...)",
+        "Digite a sigla do site/ERB.",
         key="busca_sigla_input"
     )
     submitted = st.form_submit_button("OK")
@@ -811,6 +811,7 @@ else:
 st.caption("❤️ Desenvolvido por Raphael Robles - Stay hungry, stay foolish ! 🚀")
 
  
+
 
 
 
