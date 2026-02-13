@@ -71,6 +71,24 @@ def fmt_na(x, dash="—"):
         return dash if x is None else x
 
 # ------------------------------------------------------------
+# Normalização inteligente de SIGLA (aceita RJ antes)
+# ------------------------------------------------------------
+def normalizar_sigla(sigla: str) -> str:
+    if not isinstance(sigla, str):
+        return ""
+    
+    s = sigla.strip().upper()
+    
+    # Remove espaços e traços
+    s = s.replace(" ", "").replace("-", "")
+    
+    # Remove RJ no início (ex: RJDJU, RJ DJU, RJ-DJU)
+    if s.startswith("RJ"):
+        s = s[2:]
+    
+    return s
+
+# ------------------------------------------------------------
 # Helpers: yes/no normalização + badge + fingerprint
 # ------------------------------------------------------------
 YES_ALIASES = {"sim", "s", "yes", "y", "1", "true", "verdadeiro", "ok"}
@@ -583,8 +601,17 @@ if endereco_filtro:
 st.markdown("---")
 
 # -------------------- RESULTADO DA BUSCA POR SIGLA --------------------
+ 
 if sigla_filtro:
-    df_f = df[df["sigla"].astype(str).str.upper() == str(sigla_filtro).upper()].copy()
+    sigla_normalizada = normalizar_sigla(sigla_filtro)
+ 
+    df_f = df[
+        df["sigla"]
+        .astype(str)
+        .str.upper()
+        .apply(normalizar_sigla)
+        == sigla_normalizada
+    ].copy()
 else:
     df_f = pd.DataFrame()
 
@@ -630,6 +657,7 @@ else:
 st.caption("❤️ Desenvolvido por Raphael Robles - Stay hungry, stay foolish ! 🚀")
 
  
+
 
 
 
