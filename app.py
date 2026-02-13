@@ -481,7 +481,7 @@ if st.button("🔄 Atualizar dados (limpar cache)"):
     st.cache_data.clear()
     _rerun()
 
-# -------------------- BUSCA POR SIGLA (Autocomplete + botão OK) --------------------
+# -------------------- BUSCA POR SIGLA (Autocomplete visual + OK) --------------------
  
 st.markdown("---")
 st.subheader("🔍 Buscar por SIGLA")
@@ -497,15 +497,32 @@ with st.form("form_sigla", clear_on_submit=False):
         key="busca_sigla"
     )
  
+    # AUTOCOMPLETE VISUAL (apenas sugestão, não executa busca ainda)
+    if busca:
+        busca_norm = normalizar_sigla(busca)
+ 
+        sugestoes = [
+            s for s in lista_siglas
+            if normalizar_sigla(s).startswith(busca_norm)
+        ]
+ 
+        if sugestoes:
+            st.markdown("### 🔎 Sugestões")
+            for s in sugestoes[:5]:
+                st.markdown(f"• {s}")
+        else:
+            st.markdown("Nenhuma sugestão encontrada.")
+ 
     submitted = st.form_submit_button("OK")
  
+# EXECUTA BUSCA APENAS AO CLICAR NO OK
 if submitted and busca:
+ 
     busca_norm = normalizar_sigla(busca)
  
-    # encontra primeira sigla que começa com o texto digitado
     sigla_encontrada = None
     for s in lista_siglas:
-        if normalizar_sigla(s).startswith(busca_norm):
+        if normalizar_sigla(s) == busca_norm:
             sigla_encontrada = s
             break
  
@@ -517,6 +534,7 @@ if submitted and busca:
         df_f = pd.DataFrame()
 else:
     df_f = pd.DataFrame()
+ 
 
 # -------------------- BUSCA POR ENDEREÇO -----------------
 st.markdown("---")
@@ -673,6 +691,7 @@ else:
 st.caption("❤️ Desenvolvido por Raphael Robles - Stay hungry, stay foolish ! 🚀")
 
  
+
 
 
 
