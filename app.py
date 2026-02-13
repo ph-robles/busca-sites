@@ -481,7 +481,7 @@ if st.button("🔄 Atualizar dados (limpar cache)"):
     st.cache_data.clear()
     _rerun()
 
-# -------------------- BUSCA POR SIGLA (Autocomplete clicável + OK) --------------------
+# -------------------- BUSCA POR SIGLA (Autocomplete visual + OK) --------------------
  
 st.markdown("---")
 st.subheader("🔍 Buscar por SIGLA")
@@ -490,18 +490,14 @@ lista_siglas = sorted(
     df["sigla"].dropna().astype(str).str.upper().unique().tolist()
 )
  
-# mantém valor selecionado
-if "busca_sigla" not in st.session_state:
-    st.session_state["busca_sigla"] = ""
- 
 with st.form("form_sigla", clear_on_submit=False):
  
     busca = st.text_input(
-        "Digite a sigla do site.",
+        "Digite a sigla (aceita RJDJU, rj-dju, rj dju...)",
         key="busca_sigla"
     )
  
-    # AUTOCOMPLETE VISUAL CLICÁVEL
+    # AUTOCOMPLETE VISUAL (apenas sugestão, não executa busca ainda)
     if busca:
         busca_norm = normalizar_sigla(busca)
  
@@ -512,19 +508,17 @@ with st.form("form_sigla", clear_on_submit=False):
  
         if sugestoes:
             st.markdown("### 🔎 Sugestões")
-            cols = st.columns(min(len(sugestoes[:5]), 5))
- 
-            for i, s in enumerate(sugestoes[:5]):
-                if cols[i].button(s, key=f"sug_{s}"):
-                    st.session_state["busca_sigla"] = s
-                    st.rerun()
+            for s in sugestoes[:5]:
+                st.markdown(f"• {s}")
+        else:
+            st.markdown("Nenhuma sugestão encontrada.")
  
     submitted = st.form_submit_button("OK")
  
-# EXECUTA BUSCA SOMENTE AO CLICAR OK
-if submitted and st.session_state["busca_sigla"]:
+# EXECUTA BUSCA APENAS AO CLICAR NO OK
+if submitted and busca:
  
-    busca_norm = normalizar_sigla(st.session_state["busca_sigla"])
+    busca_norm = normalizar_sigla(busca)
  
     sigla_encontrada = None
     for s in lista_siglas:
@@ -540,7 +534,6 @@ if submitted and st.session_state["busca_sigla"]:
         df_f = pd.DataFrame()
 else:
     df_f = pd.DataFrame()
- 
 
 # -------------------- BUSCA POR ENDEREÇO -----------------
 st.markdown("---")
@@ -697,6 +690,7 @@ else:
 st.caption("❤️ Desenvolvido por Raphael Robles - Stay hungry, stay foolish ! 🚀")
 
  
+
 
 
 
