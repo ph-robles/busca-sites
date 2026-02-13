@@ -10,6 +10,8 @@
 # - NOVO: 'CAPACITADO' via coluna em 'enderecos' OU via aba separada (lista de SIGLAs)
 # - NOVO: Top3 sempre inclui o site capacitado mais próximo (se existir)
 # - NOVO: Banner automático quando a base muda
+# - NOVO: Sugestões de SIGLA clicáveis como chips estilizados
+# - NOVO: Fuzzy match leve (até 1 erro) na busca por SIGLA, sem auto-executar
 # ============================================================
 
 import streamlit as st
@@ -76,16 +78,12 @@ def fmt_na(x, dash="—"):
 def normalizar_sigla(sigla: str) -> str:
     if not isinstance(sigla, str):
         return ""
-    
     s = sigla.strip().upper()
-    
     # Remove espaços e traços
     s = s.replace(" ", "").replace("-", "")
-    
     # Remove RJ no início (ex: RJDJU, RJ DJU, RJ-DJU)
     if s.startswith("RJ"):
         s = s[2:]
-    
     return s
 
 # ------------------------------------------------------------
@@ -336,7 +334,7 @@ def carregar_dados():
     return df
 
 # ------------------------------------------------------------
-# Aba "capacitados" (opcional, SIGLAs capacitados) — SUPORTE NOVO
+# Aba "capacitados" (opcional, SIGLAs capacitados)
 # ------------------------------------------------------------
 @st.cache_data(show_spinner=False)
 def carregar_capacitados_lista():
@@ -481,20 +479,26 @@ if st.button("🔄 Atualizar dados (limpar cache)"):
     st.cache_data.clear()
     _rerun()
 
-# -------------------- BUSCA POR SIGLA (Autocomplete clicável + fuzzy; OK executa) --------------------
-
+# ============================================================
+# -------------------- BUSCA POR SIGLA -----------------------
+# (Autocomplete clicável em chips + fuzzy; OK executa busca)
+# ============================================================
 st.markdown("---")
 st.subheader("🔍 Buscar por SIGLA")
-
-# Garante estado inicial do input (evita KeyError)
-if "busca_sigla_input" not in st.session_state:
-    st.session_state["busca_sigla_input"] = ""
 
 lista_siglas = sorted(
     df["sigla"].dropna().astype(str).str.upper().unique().tolist()
 )
 
-# ---------- Funções auxiliares ----------
+# ---------- Estado inicial & hidratação (ANTES de criar o widget!) ----------
+if "busca_sigla_input" not in st.session_state:
+    st.session_state["busca_sigla_input"] = ""
+
+# Se um chip foi clicado, no ciclo anterior guardamos em 'pending':
+if "busca_sigla_pending" in st.session_state:
+    st.session_state["busca_sigla_input"] = st.session_state.pop("busca_sigla_pending")
+
+# ---------- Auxiliares (fuzzy + sugestões) ----------
 def _levenshtein(a: str, b: str) -> int:
     """Distância de edição (inserção/remoção/substituição)."""
     if a == b:
@@ -544,11 +548,16 @@ def _gerar_sugestoes(busca_raw: str, candidatos: list[str], limite: int = 8) -> 
 
     return pref[:limite]
 
+# Callback dos chips: salva em "pending" (não escreve no key do widget)
+def _select_sugestao(value: str):
+    st.session_state["busca_sigla_pending"] = value
+    # O clique no botão já dispara um rerun automaticamente.
+
 # ---------- Form: apenas o OK submete ----------
 with st.form("form_sigla", clear_on_submit=False):
     busca = st.text_input(
         "Digite a sigla (aceita RJDJU, rj-dju, rj dju...)",
-        key="busca_sigla_input"   # <--- key diferente!
+        key="busca_sigla_input"
     )
     submitted = st.form_submit_button("OK")
 
@@ -608,11 +617,12 @@ if busca:
         cols = st.columns(max(2, min(6, len(sugestoes))))
         for i, s in enumerate(sugestoes):
             with cols[i % len(cols)]:
-                if st.button(s, key=f"sug_{s}"):
-                    # Preenche o input e reroda (sem submeter)
-                    st.session_state["busca_sigla_input"] = s
-                    _rerun()
-
+                st.button(
+                    s,
+                    key=f"sug_{s}",
+                    on_click=_select_sugestao,
+                    args=(s,),
+                )
         st.markdown("</div>", unsafe_allow_html=True)
     else:
         st.markdown("Nenhuma sugestão encontrada.")
@@ -624,14 +634,14 @@ if submitted and (busca or st.session_state.get("busca_sigla_input")):
 
     # 1) Match exato (normalizado)
     sigla_encontrada = None
-    for s in lista_siglas:
-        if normalizar_sigla(s) == busca_norm:
-            sigla_encontrada = s
+    for s_ in lista_siglas:
+        if normalizar_sigla(s_) == busca_norm:
+            sigla_encontrada = s_
             break
 
     # 2) Fuzzy leve (<= 1 erro) se não achou exato
     if sigla_encontrada is None:
-        dists = [(s, _levenshtein(normalizar_sigla(s), busca_norm)) for s in lista_siglas]
+        dists = [(s_, _levenshtein(normalizar_sigla(s_), busca_norm)) for s_ in lista_siglas]
         s_best, d_best = min(dists, key=lambda x: x[1]) if dists else (None, 999)
         if d_best <= 1:
             sigla_encontrada = s_best
@@ -643,8 +653,9 @@ if submitted and (busca or st.session_state.get("busca_sigla_input")):
 else:
     df_f = pd.DataFrame()
 
-
-# -------------------- BUSCA POR ENDEREÇO -----------------
+# ============================================================
+# -------------------- BUSCA POR ENDEREÇO --------------------
+# ============================================================
 st.markdown("---")
 st.subheader("🧭 Buscar por ENDEREÇO do cliente → 3 sites mais próximos")
 
@@ -755,8 +766,9 @@ if endereco_filtro:
 
 st.markdown("---")
 
-# -------------------- RESULTADO DA BUSCA POR SIGLA --------------------
- 
+# ============================================================
+# -------------- RESULTADO DA BUSCA POR SIGLA ----------------
+# ============================================================
 if df_f.empty:
     st.warning("⚠️ Nenhum site encontrado.")
 else:
@@ -799,6 +811,7 @@ else:
 st.caption("❤️ Desenvolvido por Raphael Robles - Stay hungry, stay foolish ! 🚀")
 
  
+
 
 
 
