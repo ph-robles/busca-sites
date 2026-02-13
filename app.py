@@ -481,13 +481,49 @@ if st.button("🔄 Atualizar dados (limpar cache)"):
     st.cache_data.clear()
     _rerun()
 
-# -------------------- BUSCA POR SIGLA --------------------
-with st.form("form_sigla", clear_on_submit=False):
-    sigla = st.text_input("🔍 Buscar por SIGLA:")
-    submitted = st.form_submit_button("OK")
-if submitted:
-    st.session_state["sigla"] = sigla
-sigla_filtro = st.session_state.get("sigla", "")
+# -------------------- BUSCA POR SIGLA (Autocomplete estilo Google) --------------------
+ 
+st.markdown("---")
+st.subheader("🔍 Buscar por SIGLA")
+ 
+lista_siglas = sorted(
+    df["sigla"].dropna().astype(str).str.upper().unique().tolist()
+)
+ 
+busca = st.text_input(
+    "Digite a sigla (aceita RJDJU, rj-dju, rj dju...)",
+    key="busca_sigla"
+)
+ 
+sigla_selecionada = None
+ 
+if busca:
+    busca_norm = normalizar_sigla(busca)
+ 
+    sugestoes = [
+        s for s in lista_siglas
+        if normalizar_sigla(s).startswith(busca_norm)
+    ]
+ 
+    if sugestoes:
+        st.markdown("### 🔎 Sugestões")
+        for s in sugestoes[:5]:
+            if st.button(f"👉 {s}", key=f"sug_{s}"):
+                st.session_state["sigla_final"] = s
+    else:
+        st.warning("Nenhuma sigla encontrada.")
+ 
+if "sigla_final" in st.session_state:
+    sigla_selecionada = st.session_state["sigla_final"]
+else:
+    sigla_selecionada = None
+ 
+if sigla_selecionada:
+    df_f = df[
+        df["sigla"].astype(str).str.upper() == sigla_selecionada
+    ].copy()
+else:
+    df_f = pd.DataFrame()
 
 # -------------------- BUSCA POR ENDEREÇO -----------------
 st.markdown("---")
@@ -602,19 +638,6 @@ st.markdown("---")
 
 # -------------------- RESULTADO DA BUSCA POR SIGLA --------------------
  
-if sigla_filtro:
-    sigla_normalizada = normalizar_sigla(sigla_filtro)
- 
-    df_f = df[
-        df["sigla"]
-        .astype(str)
-        .str.upper()
-        .apply(normalizar_sigla)
-        == sigla_normalizada
-    ].copy()
-else:
-    df_f = pd.DataFrame()
-
 if df_f.empty:
     st.warning("⚠️ Nenhum site encontrado.")
 else:
@@ -657,6 +680,7 @@ else:
 st.caption("❤️ Desenvolvido por Raphael Robles - Stay hungry, stay foolish ! 🚀")
 
  
+
 
 
 
