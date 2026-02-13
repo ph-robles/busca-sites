@@ -481,7 +481,7 @@ if st.button("🔄 Atualizar dados (limpar cache)"):
     st.cache_data.clear()
     _rerun()
 
-# -------------------- BUSCA POR SIGLA (Autocomplete estilo Google) --------------------
+# -------------------- BUSCA POR SIGLA (Autocomplete + botão OK) --------------------
  
 st.markdown("---")
 st.subheader("🔍 Buscar por SIGLA")
@@ -490,38 +490,31 @@ lista_siglas = sorted(
     df["sigla"].dropna().astype(str).str.upper().unique().tolist()
 )
  
-busca = st.text_input(
-    "Digite a sigla (aceita RJDJU, rj-dju, rj dju...)",
-    key="busca_sigla"
-)
+with st.form("form_sigla", clear_on_submit=False):
  
-sigla_selecionada = None
+    busca = st.text_input(
+        "Digite a sigla (aceita RJDJU, rj-dju, rj dju...)",
+        key="busca_sigla"
+    )
  
-if busca:
+    submitted = st.form_submit_button("OK")
+ 
+if submitted and busca:
     busca_norm = normalizar_sigla(busca)
  
-    sugestoes = [
-        s for s in lista_siglas
-        if normalizar_sigla(s).startswith(busca_norm)
-    ]
+    # encontra primeira sigla que começa com o texto digitado
+    sigla_encontrada = None
+    for s in lista_siglas:
+        if normalizar_sigla(s).startswith(busca_norm):
+            sigla_encontrada = s
+            break
  
-    if sugestoes:
-        st.markdown("### 🔎 Sugestões")
-        for s in sugestoes[:5]:
-            if st.button(f"👉 {s}", key=f"sug_{s}"):
-                st.session_state["sigla_final"] = s
+    if sigla_encontrada:
+        df_f = df[
+            df["sigla"].astype(str).str.upper() == sigla_encontrada
+        ].copy()
     else:
-        st.warning("Nenhuma sigla encontrada.")
- 
-if "sigla_final" in st.session_state:
-    sigla_selecionada = st.session_state["sigla_final"]
-else:
-    sigla_selecionada = None
- 
-if sigla_selecionada:
-    df_f = df[
-        df["sigla"].astype(str).str.upper() == sigla_selecionada
-    ].copy()
+        df_f = pd.DataFrame()
 else:
     df_f = pd.DataFrame()
 
@@ -680,6 +673,7 @@ else:
 st.caption("❤️ Desenvolvido por Raphael Robles - Stay hungry, stay foolish ! 🚀")
 
  
+
 
 
 
