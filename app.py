@@ -481,26 +481,20 @@ if st.button("🔄 Atualizar dados (limpar cache)"):
     st.cache_data.clear()
     _rerun()
 
-# -------------------- BUSCA POR SIGLA (Autocomplete clicável + fuzzy, OK é quem busca) --------------------
+# -------------------- BUSCA POR SIGLA (Autocomplete clicável + fuzzy; OK executa) --------------------
 
 st.markdown("---")
 st.subheader("🔍 Buscar por SIGLA")
+
+# Garante estado inicial do input (evita KeyError)
+if "busca_sigla_input" not in st.session_state:
+    st.session_state["busca_sigla_input"] = ""
 
 lista_siglas = sorted(
     df["sigla"].dropna().astype(str).str.upper().unique().tolist()
 )
 
-# Mapa auxiliar: normalizado -> original
-_norm_map = {s: normalizar_sigla(s) for s in lista_siglas}
-
-with st.form("form_sigla", clear_on_submit=False):
-    busca = st.text_input(
-        "Digite a sigla (aceita RJDJU, rj-dju, rj dju...)",
-        key="busca_sigla"
-    )
-    submitted = st.form_submit_button("OK")
-
-# ===== SUGESTÕES CLICÁVEIS (FORA DO FORM) =====
+# ---------- Funções auxiliares ----------
 def _levenshtein(a: str, b: str) -> int:
     """Distância de edição (inserção/remoção/substituição)."""
     if a == b:
@@ -520,11 +514,10 @@ def _levenshtein(a: str, b: str) -> int:
         prev = curr
     return prev[-1]
 
-def _gerar_sugestoes(busca_raw: str, candidatos: list[str], limite: int = 5) -> list[str]:
+def _gerar_sugestoes(busca_raw: str, candidatos: list[str], limite: int = 8) -> list[str]:
     if not busca_raw:
         return []
     bn = normalizar_sigla(busca_raw)
-
     pares = [(s, normalizar_sigla(s)) for s in candidatos]
 
     # 1) Começa com...
@@ -551,24 +544,82 @@ def _gerar_sugestoes(busca_raw: str, candidatos: list[str], limite: int = 5) -> 
 
     return pref[:limite]
 
-# Renderiza sugestões como botões "chips"
+# ---------- Form: apenas o OK submete ----------
+with st.form("form_sigla", clear_on_submit=False):
+    busca = st.text_input(
+        "Digite a sigla (aceita RJDJU, rj-dju, rj dju...)",
+        key="busca_sigla_input"   # <--- key diferente!
+    )
+    submitted = st.form_submit_button("OK")
+
+# ---------- CSS dos chips (escopado) ----------
+st.markdown("""
+<style>
+/* Container dos chips */
+#chips-scope { margin-top: .25rem; }
+
+/* Espaçamento vertical entre colunas de chips */
+#chips-scope div[data-testid="stHorizontalBlock"] { row-gap: .5rem; }
+
+/* Botão dos chips */
+#chips-scope div[data-testid="stButton"] > button {
+  border-radius: 9999px;            /* pílula */
+  padding: .35rem .9rem;            /* confortável */
+  font-size: 0.9rem;
+  line-height: 1rem;
+  border: 1px solid rgba(49,51,63,0.25);
+  background: rgba(49,51,63,0.04);
+  color: inherit;
+  cursor: pointer;
+  transition: all .15s ease-in-out;
+}
+
+/* Hover */
+#chips-scope div[data-testid="stButton"] > button:hover {
+  background: rgba(49,51,63,0.08);
+  border-color: rgba(49,51,63,0.4);
+  transform: translateY(-1px);
+}
+
+/* Active/press */
+#chips-scope div[data-testid="stButton"] > button:active {
+  transform: translateY(0px) scale(.98);
+}
+
+/* Ajustes para tema escuro */
+:root .st-dark #chips-scope div[data-testid="stButton"] > button {
+  border-color: rgba(250, 250, 250, 0.18);
+  background: rgba(250, 250, 250, 0.06);
+}
+:root .st-dark #chips-scope div[data-testid="stButton"] > button:hover {
+  border-color: rgba(250, 250, 250, 0.35);
+  background: rgba(250, 250, 250, 0.12);
+}
+</style>
+""", unsafe_allow_html=True)
+
+# ---------- Sugestões clicáveis (fora do form) ----------
 if busca:
-    sugestoes = _gerar_sugestoes(busca, lista_siglas, limite=5)
+    sugestoes = _gerar_sugestoes(busca, lista_siglas, limite=8)
     if sugestoes:
         st.markdown("### 🔎 Sugestões (clique para preencher)")
-        cols = st.columns(max(1, min(5, len(sugestoes))))
+        st.markdown('<div id="chips-scope">', unsafe_allow_html=True)
+
+        cols = st.columns(max(2, min(6, len(sugestoes))))
         for i, s in enumerate(sugestoes):
             with cols[i % len(cols)]:
                 if st.button(s, key=f"sug_{s}"):
-                    # Preenche o campo de texto e reroda, sem submeter
-                    st.session_state["busca_sigla"] = s
+                    # Preenche o input e reroda (sem submeter)
+                    st.session_state["busca_sigla_input"] = s
                     _rerun()
+
+        st.markdown("</div>", unsafe_allow_html=True)
     else:
         st.markdown("Nenhuma sugestão encontrada.")
 
-# ===== EXECUTA BUSCA APENAS AO CLICAR EM OK =====
-if submitted and (busca or st.session_state.get("busca_sigla")):
-    busca_val = busca if busca else st.session_state.get("busca_sigla")
+# ---------- Executa busca apenas ao clicar em OK ----------
+if submitted and (busca or st.session_state.get("busca_sigla_input")):
+    busca_val = busca if busca else st.session_state.get("busca_sigla_input", "")
     busca_norm = normalizar_sigla(busca_val)
 
     # 1) Match exato (normalizado)
@@ -748,6 +799,7 @@ else:
 st.caption("❤️ Desenvolvido por Raphael Robles - Stay hungry, stay foolish ! 🚀")
 
  
+
 
 
 
