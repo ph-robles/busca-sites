@@ -501,6 +501,9 @@ if "busca_sigla_pending" in st.session_state:
 # Se foi solicitado auto-executar a busca (por clique no chip), consome o flag aqui
 auto_trigger = st.session_state.pop("do_busca_sigla", False)
 
+# ---------- Container para resultados da SIGLA (logo abaixo da caixa) ----------
+sigla_results_ct = st.container()
+
 # ---------- Auxiliares (fuzzy + sugestões) ----------
 def _levenshtein(a: str, b: str) -> int:
     """Distância de edição (inserção/remoção/substituição)."""
@@ -568,16 +571,11 @@ with st.form("form_sigla", clear_on_submit=False):
 # ---------- CSS dos chips (escopado) ----------
 st.markdown("""
 <style>
-/* Container dos chips */
 #chips-scope { margin-top: .25rem; }
-
-/* Espaçamento vertical entre colunas de chips */
 #chips-scope div[data-testid="stHorizontalBlock"] { row-gap: .5rem; }
-
-/* Botão dos chips */
 #chips-scope div[data-testid="stButton"] > button {
-  border-radius: 9999px;            /* pílula */
-  padding: .35rem .9rem;            /* confortável */
+  border-radius: 9999px;
+  padding: .35rem .9rem;
   font-size: 0.9rem;
   line-height: 1rem;
   border: 1px solid rgba(49,51,63,0.25);
@@ -586,20 +584,14 @@ st.markdown("""
   cursor: pointer;
   transition: all .15s ease-in-out;
 }
-
-/* Hover */
 #chips-scope div[data-testid="stButton"] > button:hover {
   background: rgba(49,51,63,0.08);
   border-color: rgba(49,51,63,0.4);
   transform: translateY(-1px);
 }
-
-/* Active/press */
 #chips-scope div[data-testid="stButton"] > button:active {
   transform: translateY(0px) scale(.98);
 }
-
-/* Ajustes para tema escuro */
 :root .st-dark #chips-scope div[data-testid="stButton"] > button {
   border-color: rgba(250, 250, 250, 0.18);
   background: rgba(250, 250, 250, 0.06);
@@ -617,7 +609,6 @@ if busca:
     if sugestoes:
         st.markdown("### 🔎 Sugestões (clique para buscar)")
         st.markdown('<div id="chips-scope">', unsafe_allow_html=True)
-
         cols = st.columns(max(2, min(6, len(sugestoes))))
         for i, s in enumerate(sugestoes):
             with cols[i % len(cols)]:
@@ -632,9 +623,7 @@ if busca:
         st.markdown("Nenhuma sugestão encontrada.")
 
 # ---------- Executa busca se OK foi clicado OU se veio de um chip ----------
-should_search = submitted or auto_trigger
-
-if should_search and (busca or st.session_state.get("busca_sigla_input")):
+if (submitted or auto_trigger) and st.session_state.get("busca_sigla_input"):
     busca_val = st.session_state.get("busca_sigla_input", "")
     busca_norm = normalizar_sigla(busca_val)
 
@@ -659,8 +648,49 @@ if should_search and (busca or st.session_state.get("busca_sigla_input")):
 else:
     df_f = pd.DataFrame()
 
+# ---------- RENDER dos resultados DE SIGLA no container dedicado ----------
+with sigla_results_ct:
+    if df_f.empty:
+        st.warning("⚠️ Nenhum site encontrado.")
+    else:
+        df_f["cidade"] = df_f.apply(lambda r: detectar_cidade(r.get("nome"), r.get("endereco")), axis=1)
+        st.success(f"🔎 {len(df_f)} site(s) encontrado(s).")
+
+        cols_sigla = [c for c in ["sigla", "cidade", "detentora", "nome", "endereco", "lat", "lon", "capacitado"] if c in df_f.columns]
+        st.dataframe(df_f[cols_sigla], use_container_width=True)
+
+        st.markdown("### 📍 Detalhes do(s) site(s) encontrado(s)")
+
+        def tecnicos_por_sigla(sig: str):
+            if ACESSOS_OK is None or ACESSOS_OK.empty:
+                return []
+            temp = ACESSOS_OK[ACESSOS_OK["sigla"].astype(str).str.upper() == str(sig).upper()]
+            return sorted(temp["tecnico"].dropna().unique().tolist())
+
+        for _, row in df_f.iterrows():
+            st.markdown(f"**{row['sigla']} — {row['nome']}**")
+
+            if pd.notna(row.get("lat")) and pd.notna(row.get("lon")):
+                url = f"https://www.google.com/maps/search/?api=1&query={row['lat']},{row['lon']}"
+                st.link_button("🗺️ Ver no Google Maps", url, type="primary")
+
+            det = row["detentora"] if pd.notna(row["detentora"]) else "—"
+            cap_badge_row = capacitado_badge(row.get("capacitado"))
+            st.markdown(
+                f"🏙️ **Cidade:** {row.get('cidade') or '—'}  \n"
+                f"🏢 **Detentora:** {det}  \n"
+                f"📌 **Endereço:** {row['endereco']}  \n"
+                f"🧰 {cap_badge_row}"
+            )
+
+            tecnicos = tecnicos_por_sigla(row["sigla"])
+            lista_md = "\n".join([f"- {t}" for t in tecnicos]) if tecnicos else "—"
+            st.info(f"**👤 Técnicos com acesso liberado:**\n{lista_md}")
+
+            st.markdown("---")
 # ============================================================
 # -------------------- BUSCA POR ENDEREÇO --------------------
+# (Resultados logo abaixo da caixa de endereço)
 # ============================================================
 st.markdown("---")
 st.subheader("🧭 Buscar por ENDEREÇO do cliente → 3 sites mais próximos")
@@ -668,155 +698,118 @@ st.subheader("🧭 Buscar por ENDEREÇO do cliente → 3 sites mais próximos")
 with st.form("form_endereco", clear_on_submit=False):
     endereco_cliente = st.text_input("Digite o endereço completo (rua, número, bairro, cidade — RJ de preferência)")
     submitted_endereco = st.form_submit_button("Buscar sites")
+
+# Container dedicado para os resultados do endereço:
+endereco_results_ct = st.container()
+
 if submitted_endereco:
     st.session_state["endereco_cliente"] = endereco_cliente
 endereco_filtro = st.session_state.get("endereco_cliente", "")
 
-if endereco_filtro:
-    with st.spinner("Geocodificando endereço e calculando distâncias..."):
-        geo, _ = geocode_address(endereco_filtro)
+with endereco_results_ct:
+    if endereco_filtro:
+        with st.spinner("Geocodificando endereço e calculando distâncias..."):
+            geo, _ = geocode_address(endereco_filtro)
 
-    if not geo:
-        st.error("❌ Endereço não encontrado. Tente incluir número/bairro/cidade. "
-                 "Se persistir, refine o endereço ou tente outro próximo.")
-    else:
-        lat_cli, lon_cli = geo["lat"], geo["lon"]
-        st.success("✅ Endereço localizado:")
-        st.markdown(f"**{geo['formatted']}**  \n🧭 **Coordenadas**: {lat_cli:.6f}, {lon_cli:.6f}")
-
-        base = df.dropna(subset=["lat", "lon"]).copy()
-        if base.empty:
-            st.warning("⚠️ Nenhuma ERB na planilha possui coordenadas válidas.")
+        if not geo:
+            st.error("❌ Endereço não encontrado. Tente incluir número/bairro/cidade. "
+                    "Se persistir, refine o endereço ou tente outro próximo.")
         else:
-            base["dist_km_linear"] = haversine_km(lat_cli, lon_cli, base["lat"].values, base["lon"].values)
+            lat_cli, lon_cli = geo["lat"], geo["lon"]
+            st.success("✅ Endereço localizado:")
+            st.markdown(f"**{geo['formatted']}**  \n🧭 **Coordenadas**: {lat_cli:.6f}, {lon_cli:.6f}")
 
-            # 1) Top3 normal
-            top3 = base.nsmallest(3, "dist_km_linear").copy()
+            base = df.dropna(subset=["lat", "lon"]).copy()
+            if base.empty:
+                st.warning("⚠️ Nenhuma ERB na planilha possui coordenadas válidas.")
+            else:
+                base["dist_km_linear"] = haversine_km(lat_cli, lon_cli, base["lat"].values, base["lon"].values)
 
-            # 2) Capacitado mais próximo (se houver)
-            base_cap = base[base["_is_capacitado"] == True].copy()
-            forced_cap_row = None
-            if not base_cap.empty:
-                idx_min_cap = base_cap["dist_km_linear"].idxmin()
-                forced_cap_row = base_cap.loc[[idx_min_cap]].copy()
+                # 1) Top3 normal
+                top3 = base.nsmallest(3, "dist_km_linear").copy()
 
-            # 3) Forçar inclusão do capacitado mais próximo
-            if forced_cap_row is not None:
-                if forced_cap_row.iloc[0]["sigla"] not in top3["sigla"].astype(str).tolist():
-                    union_df = pd.concat([top3, forced_cap_row], ignore_index=True)
-                    union_df = union_df.sort_values("dist_km_linear", ascending=True)
-                    union_df = union_df.drop_duplicates(subset=["sigla"], keep="first")
-                    if len(union_df) > 3:
-                        sigla_cap = forced_cap_row.iloc[0]["sigla"]
-                        first3 = union_df.head(3)
-                        if sigla_cap not in first3["sigla"].astype(str).tolist():
-                            union_df = pd.concat([union_df.head(2), forced_cap_row], ignore_index=True)
-                            union_df = union_df.drop_duplicates(subset=["sigla"], keep="first")
-                            union_df = union_df.sort_values("dist_km_linear", ascending=True)
-                    top3 = union_df.head(3).reset_index(drop=True)
+                # 2) Capacitado mais próximo (se houver)
+                base_cap = base[base["_is_capacitado"] == True].copy()
+                forced_cap_row = None
+                if not base_cap.empty:
+                    idx_min_cap = base_cap["dist_km_linear"].idxmin()
+                    forced_cap_row = base_cap.loc[[idx_min_cap]].copy()
+
+                # 3) Forçar inclusão do capacitado mais próximo
+                if forced_cap_row is not None:
+                    if forced_cap_row.iloc[0]["sigla"] not in top3["sigla"].astype(str).tolist():
+                        union_df = pd.concat([top3, forced_cap_row], ignore_index=True)
+                        union_df = union_df.sort_values("dist_km_linear", ascending=True)
+                        union_df = union_df.drop_duplicates(subset=["sigla"], keep="first")
+                        if len(union_df) > 3:
+                            sigla_cap = forced_cap_row.iloc[0]["sigla"]
+                            first3 = union_df.head(3)
+                            if sigla_cap not in first3["sigla"].astype(str).tolist():
+                                union_df = pd.concat([union_df.head(2), forced_cap_row], ignore_index=True)
+                                union_df = union_df.drop_duplicates(subset=["sigla"], keep="first")
+                                union_df = union_df.sort_values("dist_km_linear", ascending=True)
+                        top3 = union_df.head(3).reset_index(drop=True)
+                    else:
+                        top3 = top3.sort_values("dist_km_linear", ascending=True).reset_index(drop=True)
                 else:
                     top3 = top3.sort_values("dist_km_linear", ascending=True).reset_index(drop=True)
-            else:
-                top3 = top3.sort_values("dist_km_linear", ascending=True).reset_index(drop=True)
 
-            # OSRM
-            dm_out, dm_dbg = osrm_table(
-                lat_cli, lon_cli,
-                [(float(r["lat"]), float(r["lon"])) for _, r in top3.iterrows()]
-            )
-            if dm_out and len(dm_out) == len(top3) and (dm_dbg.get("status") in ("Ok", "OK", None)):
-                top3["dist_rodov_text"] = [x["distance_text"] for x in dm_out]
-                top3["duracao_text"]    = [x["duration_text"] for x in dm_out]
-                top3["duracao_s"]       = [x["duration_s"] for x in dm_out]
-            else:
-                top3["dist_rodov_text"] = pd.NA
-                top3["duracao_text"]    = pd.NA
-                top3["duracao_s"]       = pd.NA
-
-            st.markdown("### 📍 3 sites mais próximos (priorizando o capacitado mais próximo)")
-            mostrar_cols = [c for c in [
-                "sigla", "nome", "detentora", "endereco", "lat", "lon",
-                "capacitado",
-                "dist_km_linear", "dist_rodov_text", "duracao_text"
-            ] if c in top3.columns]
-            st.dataframe(
-                top3[mostrar_cols].assign(dist_km_linear=lambda d: d["dist_km_linear"].round(3)),
-                use_container_width=True
-            )
-
-            # Cartões
-            for _, row in top3.iterrows():
-                erb_lat, erb_lon = float(row["lat"]), float(row["lon"])
-                maps_erb = f"https://www.google.com/maps/search/?api=1&query={erb_lat},{erb_lon}"
-                rota = f"https://www.google.com/maps/dir/?api=1&origin={lat_cli},{lon_cli}&destination={erb_lat},{erb_lon}&travelmode=driving"
-
-                dist_rodov_text = fmt_na(row.get("dist_rodov_text"))
-                duracao_text    = fmt_na(row.get("duracao_text"))
-                cap_badge       = capacitado_badge(row.get("capacitado"))
-
-                title = f"**{row.get('sigla', '—')} — {row.get('nome', '—')}**"
-                meta = (
-                    f"🗺️ Linha reta: **{row['dist_km_linear']:.3f} km**  \n"
-                    f"🚗 Rota: {dist_rodov_text}  \n"
-                    f"⏱️ Tempo: {duracao_text}  \n"
-                    f"📌 Coords: {erb_lat:.6f}, {erb_lon:.6f}  \n"
-                    f"🧰 {cap_badge}"
+                # OSRM
+                dm_out, dm_dbg = osrm_table(
+                    lat_cli, lon_cli,
+                    [(float(r["lat"]), float(r["lon"])) for _, r in top3.iterrows()]
                 )
-                st.markdown(title + "  \n" + meta)
-                cols = st.columns(2)
-                with cols[0]:
-                    st.link_button("🗺️ Ver no Google Maps", maps_erb, type="primary")
-                with cols[1]:
-                    st.link_button("🚗 Traçar rota a partir do cliente", rota)
-                st.markdown("---")
+                if dm_out and len(dm_out) == len(top3) and (dm_dbg.get("status") in ("Ok", "OK", None)):
+                    top3["dist_rodov_text"] = [x["distance_text"] for x in dm_out]
+                    top3["duracao_text"]    = [x["duration_text"] for x in dm_out]
+                    top3["duracao_s"]       = [x["duration_s"] for x in dm_out]
+                else:
+                    top3["dist_rodov_text"] = pd.NA
+                    top3["duracao_text"]    = pd.NA
+                    top3["duracao_s"]       = pd.NA
 
-st.markdown("---")
+                st.markdown("### 📍 3 sites mais próximos (priorizando o capacitado mais próximo)")
+                mostrar_cols = [c for c in [
+                    "sigla", "nome", "detentora", "endereco", "lat", "lon",
+                    "capacitado",
+                    "dist_km_linear", "dist_rodov_text", "duracao_text"
+                ] if c in top3.columns]
+                st.dataframe(
+                    top3[mostrar_cols].assign(dist_km_linear=lambda d: d["dist_km_linear"].round(3)),
+                    use_container_width=True
+                )
 
-# ============================================================
-# -------------- RESULTADO DA BUSCA POR SIGLA ----------------
-# ============================================================
-if df_f.empty:
-    st.warning("⚠️ Nenhum site encontrado.")
-else:
-    df_f["cidade"] = df_f.apply(lambda r: detectar_cidade(r.get("nome"), r.get("endereco")), axis=1)
-    st.success(f"🔎 {len(df_f)} site(s) encontrado(s).")
+                # Cartões
+                for _, row in top3.iterrows():
+                    erb_lat, erb_lon = float(row["lat"]), float(row["lon"])
+                    maps_erb = f"https://www.google.com/maps/search/?api=1&query={erb_lat},{erb_lon}"
+                    rota = f"https://www.google.com/maps/dir/?api=1&origin={lat_cli},{lon_cli}&destination={erb_lat},{erb_lon}&travelmode=driving"
 
-    cols_sigla = [c for c in ["sigla", "cidade", "detentora", "nome", "endereco", "lat", "lon", "capacitado"] if c in df_f.columns]
-    st.dataframe(df_f[cols_sigla], use_container_width=True)
+                    dist_rodov_text = fmt_na(row.get("dist_rodov_text"))
+                    duracao_text    = fmt_na(row.get("duracao_text"))
+                    cap_badge       = capacitado_badge(row.get("capacitado"))
 
-    st.markdown("### 📍 Detalhes do(s) site(s) encontrado(s)")
+                    title = f"**{row.get('sigla', '—')} — {row.get('nome', '—')}**"
+                    meta = (
+                        f"🗺️ Linha reta: **{row['dist_km_linear']:.3f} km**  \n"
+                        f"🚗 Rota: {dist_rodov_text}  \n"
+                        f"⏱️ Tempo: {duracao_text}  \n"
+                        f"📌 Coords: {erb_lat:.6f}, {erb_lon:.6f}  \n"
+                        f"🧰 {cap_badge}"
+                    )
+                    st.markdown(title + "  \n" + meta)
+                    cols = st.columns(2)
+                    with cols[0]:
+                        st.link_button("🗺️ Ver no Google Maps", maps_erb, type="primary")
+                    with cols[1]:
+                        st.link_button("🚗 Traçar rota a partir do cliente", rota)
+                    st.markdown("---")
 
-    def tecnicos_por_sigla(sig: str):
-        if ACESSOS_OK is None or ACESSOS_OK.empty:
-            return []
-        temp = ACESSOS_OK[ACESSOS_OK["sigla"].astype(str).str.upper() == str(sig).upper()]
-        return sorted(temp["tecnico"].dropna().unique().tolist())
-
-    for _, row in df_f.iterrows():
-        st.markdown(f"**{row['sigla']} — {row['nome']}**")
-
-        if pd.notna(row.get("lat")) and pd.notna(row.get("lon")):
-            url = f"https://www.google.com/maps/search/?api=1&query={row['lat']},{row['lon']}"
-            st.link_button("🗺️ Ver no Google Maps", url, type="primary")
-
-        det = row["detentora"] if pd.notna(row["detentora"]) else "—"
-        cap_badge_row = capacitado_badge(row.get("capacitado"))
-        st.markdown(
-            f"🏙️ **Cidade:** {row.get('cidade') or '—'}  \n"
-            f"🏢 **Detentora:** {det}  \n"
-            f"📌 **Endereço:** {row['endereco']}  \n"
-            f"🧰 {cap_badge_row}"
-        )
-
-        tecnicos = tecnicos_por_sigla(row["sigla"])
-        lista_md = "\n".join([f"- {t}" for t in tecnicos]) if tecnicos else "—"
-        st.info(f"**👤 Técnicos com acesso liberado:**\n{lista_md}")
-
-        st.markdown("---")
 
 st.caption("❤️ Desenvolvido por Raphael Robles - Stay hungry, stay foolish ! 🚀")
 
  
+
 
 
 
