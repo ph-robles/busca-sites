@@ -820,7 +820,8 @@ with endereco_results_ct:
                 for _, row in top3.iterrows():
                     erb_lat, erb_lon = float(row["lat"]), float(row["lon"])
                     maps_erb = f"https://www.google.com/maps/search/?api=1&query={erb_lat},{erb_lon}"
-                    rota = f"https://www.google.com/maps/dir/?api=1&origin={lat_cli},{lon_cli}&destination={erb_lat},{erb_lon}&travelmode=driving}"
+                    # ✅ CORRIGIDO: sem '}' extra, e usando '&' (não &amp;)
+                    rota = f"https://www.google.com/maps/dir/?api=1&origin={lat_cli},{lon_cli}&destination={erb_lat},{erb_lon}&travelmode=driving"
 
                     dist_rodov_text = fmt_na(row.get("dist_rodov_text"))
                     duracao_text    = fmt_na(row.get("duracao_text"))
@@ -846,6 +847,7 @@ with endereco_results_ct:
 st.caption("❤️ Desenvolvido por Raphael Robles - Stay hungry, stay foolish ! 🚀")
 
  
+
 
 
 
