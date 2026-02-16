@@ -1,18 +1,12 @@
 # ============================================================
 # 📡 Endereços dos Sites RJ — OSM/OSRM Edition (100% gratuito)
-# Agora lendo do Supabase (tabelas: enderecos, capacitados, acessos)
+# Supabase (online) com fallback automático para CSV (offline)
 # - Geocoding: Geoapify (opcional, com key) → fallback Nominatim (sem key)
 # - Rotas/Matriz: OSRM (sem key) para distância/tempo por trajeto
-# - Detecção de cidade aprimorada (regex + fallback no endereço)
-# - Geocodificação robusta: normalização de entrada + duas tentativas no Nominatim
-# - Sem mensagens/diagnóstico na UI
-# - Corrige pd.NA em f-strings (sem usar `or` com pd.NA)
-# - Mantém toda a lógica de SIGLA e Acessos OK
-# - 'CAPACITADO' via coluna em 'enderecos' OU via tabela separada 'capacitados'
-# - Top3 sempre inclui o site capacitado mais próximo (se existir)
-# - Banner automático quando a base muda (via contagem de registros)
-# - Sugestões de SIGLA clicáveis como chips estilizados
-# - Fuzzy match leve (até 1 erro) na busca por SIGLA, sem auto-executar
+# - Detecção de cidade (regex + fallback no endereço)
+# - Correções pd.NA + exibição/UX com chips e fuzzy (≤1 erro)
+# - Top3 inclui o capacitado mais próximo (se existir)
+# - Banner quando a base muda (Supabase) ou recontagem local (CSV)
 # ============================================================
 
 import streamlit as st
@@ -26,34 +20,59 @@ import re
 import os
 from typing import List, Tuple
 
-# Supabase SDK
-from supabase import create_client, Client
-
 # ------------------------------------------------------------
 # Config
 # ------------------------------------------------------------
 st.set_page_config(page_title="Endereços dos Sites RJ", page_icon="📡", layout="wide")
 
 # ------------------------------------------------------------
-# Secrets (opcional): GEOAPIFY e conexão Supabase
+# PATCH: Supabase opcional + fallback para CSV
 # ------------------------------------------------------------
+# Tente importar a SDK do Supabase; se não houver, seguimos em modo CSV
+try:
+    from supabase import create_client, Client  # type: ignore
+    _supabase_import_ok = True
+except Exception:
+    _supabase_import_ok = False
+
+# Ler secrets (se existirem)
 GEOAPIFY_KEY = (st.secrets.get("GEOAPIFY_KEY", "") or "").strip()
 SUPABASE_URL = (st.secrets.get("SUPABASE_URL", "") or "").strip()
 SUPABASE_ANON_KEY = (st.secrets.get("SUPABASE_ANON_KEY", "") or "").strip()
 
-if not SUPABASE_URL or not SUPABASE_ANON_KEY:
-    st.error(
-        "❌ Falta configurar as chaves do Supabase em `.streamlit/secrets.toml` →\n\n"
-        "```\nSUPABASE_URL = \"https://SEU-PROJETO.supabase.co\"\nSUPABASE_ANON_KEY = \"SUA_CHAVE_ANON\"\n```"
-    )
-    st.stop()
+# Determina se Supabase está habilitado de fato
+SUPABASE_ENABLED = bool(_supabase_import_ok and SUPABASE_URL and SUPABASE_ANON_KEY)
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+# Se habilitado, cria o client
+if SUPABASE_ENABLED:
+    try:
+        supabase: "Client" = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)  # type: ignore
+        st.success("✅ Conectado ao Supabase (modo online).")
+    except Exception as e:
+        SUPABASE_ENABLED = False
+        st.warning(
+            "⚠️ Não foi possível inicializar o cliente do Supabase. "
+            "O app seguirá no **modo offline (CSV)**. "
+            f"Detalhes: {e}"
+        )
+else:
+    if not _supabase_import_ok:
+        st.info(
+            "ℹ️ **Supabase SDK não encontrada** (`pip install supabase`). "
+            "Rodando em **modo offline (CSV)**."
+        )
+    elif not (SUPABASE_URL and SUPABASE_ANON_KEY):
+        st.info(
+            "ℹ️ **Secrets do Supabase ausentes** em `.streamlit/secrets.toml`. "
+            "Rodando em **modo offline (CSV)**.\n\n"
+            "Exemplo:\n"
+            "```\nSUPABASE_URL = \"https://SEU-PROJETO.supabase.co\"\n"
+            "SUPABASE_ANON_KEY = \"SUA_CHAVE_ANON\"\n```"
+        )
 
 # ------------------------------------------------------------
 # Helper: rerun compatível (Streamlit novo/antigo)
 # ------------------------------------------------------------
-
 def _rerun():
     if hasattr(st, "rerun"):
         st.rerun()
@@ -63,12 +82,10 @@ def _rerun():
 # ------------------------------------------------------------
 # Auxiliares
 # ------------------------------------------------------------
-
 def strip_accents(s: str):
     if not isinstance(s, str):
         return s
     return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
-
 
 def haversine_km(lat1, lon1, lat2, lon2):
     """Distância Haversine em km (vetorizado para lat2/lon2)."""
@@ -83,7 +100,6 @@ def haversine_km(lat1, lon1, lat2, lon2):
     c = 2 * np.arcsin(np.sqrt(a))
     return R * c
 
-
 def fmt_na(x, dash="—"):
     """Substitui pd.NA/NaN/None por '—' evitando TypeError de truthiness com pd.NA."""
     try:
@@ -94,25 +110,20 @@ def fmt_na(x, dash="—"):
 # ------------------------------------------------------------
 # Normalização inteligente de SIGLA (aceita RJ antes)
 # ------------------------------------------------------------
-
 def normalizar_sigla(sigla: str) -> str:
     if not isinstance(sigla, str):
         return ""
     s = sigla.strip().upper()
-    # Remove espaços e traços
     s = s.replace(" ", "").replace("-", "")
-    # Remove RJ no início (ex: RJDJU, RJ DJU, RJ-DJU)
     if s.startswith("RJ"):
         s = s[2:]
     return s
 
 # ------------------------------------------------------------
-# Helpers: yes/no normalização + badge + fingerprint
+# Helpers: yes/no normalização + badge
 # ------------------------------------------------------------
-
 YES_ALIASES = {"sim", "s", "yes", "y", "1", "true", "verdadeiro", "ok"}
-NO_ALIASES = {"nao", "não", "n", "no", "0", "false", "falso"}
-
+NO_ALIASES  = {"nao", "não", "n", "no", "0", "false", "falso"}
 
 def _to_str_lower(x):
     try:
@@ -120,9 +131,7 @@ def _to_str_lower(x):
     except Exception:
         return None
 
-
 def is_yes(val) -> bool | None:
-    """Retorna True/False/None a partir de variações de sim/não."""
     if val is pd.NA or pd.isna(val):
         return None
     v = _to_str_lower(val)
@@ -134,7 +143,6 @@ def is_yes(val) -> bool | None:
         return False
     return None
 
-
 def capacitado_badge(val) -> str:
     yn = is_yes(val)
     if yn is True:
@@ -142,7 +150,6 @@ def capacitado_badge(val) -> str:
     if yn is False:
         return "❌ **Não capacitado**"
     return "—"
-
 
 BANNER_MSG = """# ============================================================
 # 📡 Endereços dos Sites RJ — OSM/OSRM Edition (100% gratuito)
@@ -158,13 +165,11 @@ BANNER_MSG = """# ============================================================
 # ------------------------------------------------------------
 # Parâmetros regionais (viés RJ para Nominatim)
 # ------------------------------------------------------------
-
-RJ_VIEWBOX = (-43.8, -23.1, -43.0, -22.7)  # melhora match no RJ
+RJ_VIEWBOX = (-43.8, -23.1, -43.0, -22.7)
 
 # ------------------------------------------------------------
 # Lista de municípios (RJ) + regex para melhor detecção
 # ------------------------------------------------------------
-
 MUNICIPIOS_RJ = [
     "Angra dos Reis", "Aperibé", "Araruama", "Areal", "Armação dos Búzios", "Arraial do Cabo",
     "Barra do Piraí", "Barra Mansa", "Belford Roxo", "Bom Jardim", "Bom Jesus do Itabapoana",
@@ -187,7 +192,6 @@ MUNICIPIOS_RJ = [
 MUNI_IDX = {strip_accents(n).lower(): n for n in MUNICIPIOS_RJ}
 _CITY_PATTERNS = {key: re.compile(rf"\b{re.escape(key)}\b") for key in MUNI_IDX.keys()}
 
-
 def _match_city_base(texto: str) -> str | None:
     if not isinstance(texto, str) or not texto.strip():
         return None
@@ -198,7 +202,6 @@ def _match_city_base(texto: str) -> str | None:
             ultimo = MUNI_IDX[key]
     return ultimo
 
-
 def detectar_cidade(nome: str, endereco: str | None = None) -> str | None:
     city = _match_city_base(nome)
     if city:
@@ -208,9 +211,8 @@ def detectar_cidade(nome: str, endereco: str | None = None) -> str | None:
     return None
 
 # ------------------------------------------------------------
-# Geocoding — normalização do endereço + Geoapify (opcional) + Nominatim (duas tentativas)
+# Geocoding — normalização + Geoapify (opcional) + Nominatim
 # ------------------------------------------------------------
-
 def _normalize_address_for_br(addr: str) -> str:
     if not isinstance(addr, str):
         return addr
@@ -221,7 +223,6 @@ def _normalize_address_for_br(addr: str) -> str:
     if len(a.split(",")) == 1:
         return f"{a}, RJ, Brasil"
     return f"{a}, Brasil"
-
 
 @st.cache_data(show_spinner=False, ttl=60*60)
 def geocode_geoapify(address: str):
@@ -250,7 +251,6 @@ def geocode_geoapify(address: str):
         dbg["status"] = "EXCEPTION"; dbg["error_message"] = str(e)
         return None, dbg
 
-
 @st.cache_data(show_spinner=False, ttl=60*60)
 def geocode_nominatim(address: str, strict_rj: bool = True):
     dbg = {"provider": "nominatim", "status": None, "error_message": None, "raw_sample": None}
@@ -278,7 +278,6 @@ def geocode_nominatim(address: str, strict_rj: bool = True):
     except Exception as e:
         dbg["status"] = "EXCEPTION"; dbg["error_message"] = str(e); return None, dbg
 
-
 def geocode_address(address: str):
     if GEOAPIFY_KEY:
         res, dbg = geocode_geoapify(address)
@@ -295,13 +294,12 @@ def geocode_address(address: str):
 # ------------------------------------------------------------
 # OSRM Table — distância/tempo
 # ------------------------------------------------------------
-
 @st.cache_data(show_spinner=False, ttl=15*60)
 def osrm_table(origin_lat: float, origin_lon: float, dests: List[Tuple[float, float]]):
     dbg = {"status": None, "error_message": None}
     if not dests:
         dbg["status"] = "NO_DESTS"; return [], dbg
-    coords = [(origin_lon, origin_lat)] + [(lon, lat) for (lat, lon) in dests]  # ordem OSRM: lon,lat
+    coords = [(origin_lon, origin_lat)] + [(lon, lat) for (lat, lon) in dests]  # OSRM usa lon,lat
     coord_str = ";".join([f"{lon},{lat}" for (lon, lat) in coords])
     url = f"https://router.project-osrm.org/table/v1/driving/{coord_str}"
     params = {"annotations": "duration,distance"}
@@ -331,66 +329,99 @@ def osrm_table(origin_lat: float, origin_lon: float, dests: List[Tuple[float, fl
         dbg["status"] = "EXCEPTION"; dbg["error_message"] = str(e); return [], dbg
 
 # ------------------------------------------------------------
-# Dados principais via Supabase (tabela: enderecos)
+# FUNÇÕES DE CARGA (ONLINE/OFFLINE)
 # ------------------------------------------------------------
-
 @st.cache_data(show_spinner=False, ttl=60)
 def carregar_dados():
     """
-    Lê a tabela 'enderecos' do Supabase e normaliza colunas para o app:
-    - sigla, nome, detentora, endereco, lat, lon, capacitado (opcional)
+    Online (Supabase): lê 'enderecos'.
+    Offline (CSV): lê 'enderecos.csv' com colunas:
+        sigla, nome, detentora, endereco, latitude, longitude, (opcional) capacitado
+    Normaliza para: sigla, nome, detentora, endereco, lat, lon, capacitado
     """
-    try:
-        resp = supabase.table("enderecos").select(
-            "sigla, nome, detentora, endereco, latitude, longitude, capacitado"
-        ).execute()
-    except Exception as e:
-        st.error(f"Erro ao consultar Supabase (enderecos): {e}")
-        return pd.DataFrame(columns=["sigla", "nome", "detentora", "endereco", "lat", "lon", "capacitado"])
+    if SUPABASE_ENABLED:
+        try:
+            resp = supabase.table("enderecos").select(
+                "sigla, nome, detentora, endereco, latitude, longitude, capacitado"
+            ).execute()
+            rows = resp.data or []
+            df = pd.DataFrame(rows)
+        except Exception as e:
+            st.warning(f"⚠️ Falha ao consultar Supabase (enderecos). Caindo para CSV. Detalhes: {e}")
+            df = pd.DataFrame()
+    else:
+        df = pd.DataFrame()
 
-    rows = resp.data or []
-    df = pd.DataFrame(rows)
+    # Fallback para CSV se vazio ou não disponível
+    if df.empty:
+        csv_path = "enderecos.csv"
+        if not os.path.exists(csv_path):
+            return pd.DataFrame(columns=["sigla", "nome", "detentora", "endereco", "lat", "lon", "capacitado"])
+        df = pd.read_csv(csv_path, dtype=str, keep_default_na=False).replace({"": pd.NA})
 
+    # Normalização
     if not df.empty:
         df.columns = df.columns.str.strip().str.lower()
-        df = df.rename(columns={"latitude": "lat", "longitude": "lon"})
+        # latitude/longitude -> lat/lon
+        rename_map = {}
+        if "latitude" in df.columns: rename_map["latitude"] = "lat"
+        if "longitude" in df.columns: rename_map["longitude"] = "lon"
+        df = df.rename(columns=rename_map)
+
         for col in ["sigla", "nome", "endereco", "detentora", "capacitado"]:
             if col in df.columns:
                 df[col] = df[col].astype("string").str.strip()
+
         for col in ["lat", "lon"]:
             if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
+                df[col] = (
+                    df[col].astype(str)
+                    .str.replace(",", ".", regex=False)
+                    .replace("", pd.NA)
+                    .pipe(pd.to_numeric, errors="coerce")
+                )
+
+        for required in ["sigla", "nome", "endereco"]:
+            if required not in df.columns:
+                df[required] = pd.NA
         if "detentora" not in df.columns:
             df["detentora"] = pd.NA
         if "capacitado" not in df.columns:
             df["capacitado"] = pd.NA
+
+        df = df[["sigla", "nome", "detentora", "endereco", "lat", "lon", "capacitado"]]
     else:
         df = pd.DataFrame(columns=["sigla", "nome", "detentora", "endereco", "lat", "lon", "capacitado"])
+
     return df
-
-
-# ------------------------------------------------------------
-# Tabela "capacitados" (opcional, SIGLAs capacitados)
-# ------------------------------------------------------------
 
 @st.cache_data(show_spinner=False, ttl=60)
 def carregar_capacitados_lista():
     """
-    Lê 'capacitados' do Supabase.
-    Retorna set(SIGLA) onde status é 'SIM' (considera variações via is_yes()).
-    Se tabela estiver vazia, retorna set().
+    Online: lê 'capacitados' (sigla, status).
+    Offline: lê 'capacitados.csv' (sigla, status).
+    Retorna set(SIGLA) onde status é "SIM" (aceita variações via is_yes()).
     """
-    try:
-        resp = supabase.table("capacitados").select("sigla, status").execute()
-    except Exception as e:
-        # Se a tabela ainda não existir / sem permissão, considere vazio
+    dfc = pd.DataFrame()
+
+    if SUPABASE_ENABLED:
+        try:
+            resp = supabase.table("capacitados").select("sigla, status").execute()
+            rows = resp.data or []
+            dfc = pd.DataFrame(rows)
+        except Exception as e:
+            st.info(f"ℹ️ Tabela 'capacitados' indisponível no Supabase. Tentando CSV. Detalhes: {e}")
+
+    if dfc.empty:
+        csv_path = "capacitados.csv"
+        if os.path.exists(csv_path):
+            dfc = pd.read_csv(csv_path, dtype=str, keep_default_na=False).replace({"": pd.NA})
+        else:
+            return set()
+
+    if dfc is None or dfc.empty:
         return set()
 
-    rows = resp.data or []
-    if not rows:
-        return set()
-
-    dfc = pd.DataFrame(rows)
     dfc.columns = dfc.columns.str.strip().str.lower()
     if "sigla" not in dfc.columns:
         return set()
@@ -403,49 +434,46 @@ def carregar_capacitados_lista():
 
     return set(siglas_ok)
 
-
-# ------------------------------------------------------------
-# Tabela "acessos" (técnicos com status ok) — opcional
-# ------------------------------------------------------------
-
 @st.cache_data(show_spinner=False, ttl=60)
 def carregar_acessos_ok():
-    try:
-        resp = supabase.table("acessos").select("sigla, tecnico, status").execute()
-    except Exception:
+    """
+    Online: lê 'acessos' (sigla, tecnico, status)
+    Offline: lê 'acessos.csv' (sigla, tecnico, status)
+    Filtra status == 'ok'
+    """
+    acc = pd.DataFrame()
+
+    if SUPABASE_ENABLED:
+        try:
+            resp = supabase.table("acessos").select("sigla, tecnico, status").execute()
+            rows = resp.data or []
+            acc = pd.DataFrame(rows)
+        except Exception:
+            pass
+
+    if acc.empty:
+        csv_path = "acessos.csv"
+        if os.path.exists(csv_path):
+            acc = pd.read_csv(csv_path, dtype=str, keep_default_na=False).replace({"": pd.NA})
+        else:
+            return None
+
+    if acc is None or acc.empty:
         return None
 
-    rows = resp.data or []
-    if not rows:
-        return None
-    acc = pd.DataFrame(rows)
     acc.columns = acc.columns.str.strip().str.lower()
-
     for c in ["sigla", "tecnico", "status"]:
         if c in acc.columns:
             acc[c] = acc[c].astype("string").str.strip()
 
-    def norm(x):
-        return strip_accents(str(x)).lower()
-
+    def norm(x): return strip_accents(str(x)).lower()
     acc = acc[acc["status"].apply(norm) == "ok"]
     return acc.reset_index(drop=True) if not acc.empty else None
-
 
 # ------------------------------------------------------------
 # Unificação do status 'capacitado' (coluna local OU tabela separada)
 # ------------------------------------------------------------
-
 def unificar_capacitado(df: pd.DataFrame, siglas_cap_set: set | None):
-    """
-    Garante que df tenha:
-      - df['capacitado'] -> para exibição ("SIM"/"NÃO"/NA)
-      - df['_is_capacitado'] -> booleano para lógica
-    Regras:
-      a) Se df já tem 'capacitado', usa is_yes() sobre ela.
-      b) Senão, se siglas_cap_set existir, marca 'SIM' para quem está no set; 'NÃO' para os demais.
-      c) Se nada disponível, deixa como NA/False.
-    """
     df = df.copy()
     if "capacitado" in df.columns:
         df["capacitado"] = df["capacitado"].astype("string").str.strip()
@@ -461,33 +489,33 @@ def unificar_capacitado(df: pd.DataFrame, siglas_cap_set: set | None):
         df["capacitado"] = pd.NA
     return df
 
-
 # ------------------------------------------------------------
 # Carregar bases
 # ------------------------------------------------------------
-
 df_raw = carregar_dados()
-siglas_cap_set = carregar_capacitados_lista()  # set() ou vazio
-
+siglas_cap_set = carregar_capacitados_lista()
 df = unificar_capacitado(df_raw, siglas_cap_set)
 ACESSOS_OK = carregar_acessos_ok()
 
-
 # ------------------------------------------------------------
-# Detector de atualização da base de dados (via contagem da tabela enderecos)
+# Detector de atualização da base (Supabase) ou contagem local
 # ------------------------------------------------------------
-
 @st.cache_data(show_spinner=False, ttl=30)
-def _count_enderecos():
+def _count_enderecos_online():
     try:
         resp = supabase.table("enderecos").select("id", count="exact").limit(1).execute()
-        # PostgrestResponse costuma ter .count
         return resp.count or (len(resp.data) if resp.data is not None else 0)
     except Exception:
-        return 0
+        return None
 
+# Chamar o detector após df estar pronto
+if SUPABASE_ENABLED:
+    curr_count = _count_enderecos_online()
+    if curr_count is None:
+        curr_count = len(df_raw)
+else:
+    curr_count = len(df_raw)
 
-curr_count = _count_enderecos()
 prev_count = st.session_state.get("enderecos_count")
 if prev_count is None:
     st.session_state["enderecos_count"] = curr_count
@@ -498,7 +526,6 @@ elif prev_count != curr_count:
 # ------------------------------------------------------------
 # UI
 # ------------------------------------------------------------
-
 st.title("📡 Endereços dos Sites RJ")
 
 if st.button("🔄 Atualizar dados (limpar cache)"):
@@ -507,9 +534,7 @@ if st.button("🔄 Atualizar dados (limpar cache)"):
 
 # ============================================================
 # -------------------- BUSCA POR SIGLA -----------------------
-# (Chips clicáveis que executam busca + fuzzy; OK também executa)
 # ============================================================
-
 st.markdown("---")
 st.subheader("🔍 Buscar por SIGLA")
 
@@ -517,24 +542,20 @@ lista_siglas = sorted(
     df["sigla"].dropna().astype(str).str.upper().unique().tolist()
 )
 
-# ---------- Estado inicial & hidratação (ANTES de criar o widget!) ----------
+# Estado inicial
 if "busca_sigla_input" not in st.session_state:
     st.session_state["busca_sigla_input"] = ""
 
-# Se um chip foi clicado, no ciclo anterior guardamos em 'pending':
+# Chip clicado?
 if "busca_sigla_pending" in st.session_state:
     st.session_state["busca_sigla_input"] = st.session_state.pop("busca_sigla_pending")
 
-# Se foi solicitado auto-executar a busca (por clique no chip), consome o flag aqui
+# Auto-execução por chip?
 auto_trigger = st.session_state.pop("do_busca_sigla", False)
 
-# ---------- Container para resultados da SIGLA (logo abaixo da caixa) ----------
 sigla_results_ct = st.container()
 
-# ---------- Auxiliares (fuzzy + sugestões) ----------
-
 def _levenshtein(a: str, b: str) -> int:
-    """Distância de edição (inserção/remoção/substituição)."""
     if a == b:
         return 0
     if not a:
@@ -552,24 +573,17 @@ def _levenshtein(a: str, b: str) -> int:
         prev = curr
     return prev[-1]
 
-
 def _gerar_sugestoes(busca_raw: str, candidatos: list[str], limite: int = 8) -> list[str]:
     if not busca_raw:
         return []
     bn = normalizar_sigla(busca_raw)
     pares = [(s, normalizar_sigla(s)) for s in candidatos]
-
-    # 1) Começa com...
     pref = [s for s, n in pares if n.startswith(bn)]
     seen = set(pref)
-
-    # 2) Contém...
     if len(pref) < limite:
         substr = [s for s, n in pares if (bn in n) and (s not in seen)]
         pref.extend(substr)
         seen.update(substr)
-
-    # 3) Fuzzy leve (distância <= 1)
     if len(pref) < limite:
         fuzzy = []
         for s, n in pares:
@@ -580,27 +594,17 @@ def _gerar_sugestoes(busca_raw: str, candidatos: list[str], limite: int = 8) -> 
                 fuzzy.append((d, s))
         fuzzy = [s for _, s in sorted(fuzzy, key=lambda x: (x[0], x[1]))]
         pref.extend(fuzzy)
-
     return pref[:limite]
-
-
-# Callback dos chips: salva em "pending" e sinaliza auto-busca
 
 def _select_sugestao(value: str):
     st.session_state["busca_sigla_pending"] = value
     st.session_state["do_busca_sigla"] = True
-    # O clique no botão já dispara um rerun automaticamente.
 
-
-# ---------- Form: o OK também segue funcionando ----------
 with st.form("form_sigla", clear_on_submit=False):
-    busca = st.text_input(
-        "Digite a sigla do site/ERB",
-        key="busca_sigla_input"
-    )
+    busca = st.text_input("Digite a sigla do site/ERB", key="busca_sigla_input")
     submitted = st.form_submit_button("OK")
 
-# ---------- CSS dos chips (escopado) ----------
+# CSS chips
 st.markdown(
     """
 <style>
@@ -638,7 +642,6 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ---------- Sugestões clicáveis (fora do form) ----------
 if busca:
     sugestoes = _gerar_sugestoes(busca, lista_siglas, limite=8)
     if sugestoes:
@@ -647,35 +650,24 @@ if busca:
         cols = st.columns(max(2, min(6, len(sugestoes))))
         for i, s in enumerate(sugestoes):
             with cols[i % len(cols)]:
-                st.button(
-                    s,
-                    key=f"sug_{s}",
-                    on_click=_select_sugestao,
-                    args=(s,),
-                )
+                st.button(s, key=f"sug_{s}", on_click=_select_sugestao, args=(s,))
         st.markdown("</div>", unsafe_allow_html=True)
     else:
         st.markdown("Nenhuma sugestão encontrada.")
 
-# ---------- Executa busca se OK foi clicado OU se veio de um chip ----------
 if (submitted or auto_trigger) and st.session_state.get("busca_sigla_input"):
     busca_val = st.session_state.get("busca_sigla_input", "")
     busca_norm = normalizar_sigla(busca_val)
-
-    # 1) Match exato (normalizado)
     sigla_encontrada = None
     for s_ in lista_siglas:
         if normalizar_sigla(s_) == busca_norm:
             sigla_encontrada = s_
             break
-
-    # 2) Fuzzy leve (<= 1 erro) se não achou exato
     if sigla_encontrada is None:
         dists = [(s_, _levenshtein(normalizar_sigla(s_), busca_norm)) for s_ in lista_siglas]
         s_best, d_best = min(dists, key=lambda x: x[1]) if dists else (None, 999)
         if d_best <= 1:
             sigla_encontrada = s_best
-
     if sigla_encontrada:
         df_f = df[df["sigla"].astype(str).str.upper() == sigla_encontrada].copy()
     else:
@@ -683,7 +675,6 @@ if (submitted or auto_trigger) and st.session_state.get("busca_sigla_input"):
 else:
     df_f = pd.DataFrame()
 
-# ---------- RENDER dos resultados DE SIGLA no container dedicado ----------
 with sigla_results_ct:
     if df_f.empty:
         st.warning("⚠️ Nenhum site encontrado.")
@@ -726,9 +717,7 @@ with sigla_results_ct:
 
 # ============================================================
 # -------------------- BUSCA POR ENDEREÇO --------------------
-# (Resultados logo abaixo da caixa de endereço)
 # ============================================================
-
 st.markdown("---")
 st.subheader("🧭 Buscar por ENDEREÇO do cliente → 3 sites mais próximos")
 
@@ -736,7 +725,6 @@ with st.form("form_endereco", clear_on_submit=False):
     endereco_cliente = st.text_input("Digite o endereço completo (rua, número, bairro, cidade — RJ de preferência)")
     submitted_endereco = st.form_submit_button("Buscar sites")
 
-# Container dedicado para os resultados do endereço:
 endereco_results_ct = st.container()
 
 if submitted_endereco:
@@ -750,7 +738,7 @@ with endereco_results_ct:
 
         if not geo:
             st.error("❌ Endereço não encontrado. Tente incluir número/bairro/cidade. "
-                    "Se persistir, refine o endereço ou tente outro próximo.")
+                     "Se persistir, refine o endereço ou tente outro próximo.")
         else:
             lat_cli, lon_cli = geo["lat"], geo["lon"]
             st.success("✅ Endereço localizado:")
@@ -820,7 +808,6 @@ with endereco_results_ct:
                 for _, row in top3.iterrows():
                     erb_lat, erb_lon = float(row["lat"]), float(row["lon"])
                     maps_erb = f"https://www.google.com/maps/search/?api=1&query={erb_lat},{erb_lon}"
-                    # ✅ CORRIGIDO: sem '}' extra, e usando '&' (não &amp;)
                     rota = f"https://www.google.com/maps/dir/?api=1&origin={lat_cli},{lon_cli}&destination={erb_lat},{erb_lon}&travelmode=driving"
 
                     dist_rodov_text = fmt_na(row.get("dist_rodov_text"))
@@ -843,10 +830,10 @@ with endereco_results_ct:
                         st.link_button("🚗 Traçar rota a partir do cliente", rota)
                     st.markdown("---")
 
-
 st.caption("❤️ Desenvolvido por Raphael Robles - Stay hungry, stay foolish ! 🚀")
 
  
+
 
 
 
