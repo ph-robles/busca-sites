@@ -314,20 +314,30 @@ def osrm_table(origin_lat: float, origin_lon: float, dests: List[Tuple[float, fl
         dbg["status"] = "EXCEPTION"; dbg["error_message"] = str(e); return [], dbg
 
 # ------------------------------------------------------------
-# Dados principais (Supabase: tabela 'enderecos')
+# Dados principais (Supabase: tabela 'enderecos') com normalização tolerante
 # ------------------------------------------------------------
 @st.cache_data(show_spinner=False, ttl=60)
 def carregar_dados():
     """
     Lê do Supabase (tabela 'enderecos') e normaliza os nomes de colunas para:
-    sigla, nome, detentora, endereco, lat, lon, capacitado
-    Aceita variações comuns: sigla_da_torre/nome_da_torre, endereço, latitude/longitude, lat/lon.
+    sigla, nome, detentora, endereco, lat, lon, capacitado.
+
+    Aceita variações comuns de import:
+      - sigla / sigla_da_torre / site / torre
+      - nome / nome_da_torre
+      - endereco / endereço
+      - lat / latitude
+      - lon / longitude
+      - capacitado / status_capacitado (opcional)
+      - detentora (opcional)
     """
-    # Busque múltiplos campos para tolerar variações de import
-    resp = supabase.table("enderecos").select(
-        "sigla, sigla_da_torre, nome, nome_da_torre, detentora, endereco, endereço, "
-        "latitude, longitude, lat, lon, capacitado"
-    ).execute()
+    try:
+        # Seleciona tudo para evitar 400 por colunas inexistentes
+        resp = supabase.table("enderecos").select("*").execute()
+    except Exception as e:
+        st.error(f"Erro ao consultar tabela 'enderecos' no Supabase: {e}")
+        return pd.DataFrame(columns=["sigla","nome","detentora","endereco","lat","lon","capacitado"])
+
     rows = resp.data or []
     df = pd.DataFrame(rows)
 
@@ -337,69 +347,49 @@ def carregar_dados():
 
     df.columns = df.columns.str.strip().str.lower()
 
-    # SIGLA: preferir 'sigla' senão 'sigla_da_torre'
-    df["sigla"] = (
-        df.get("sigla")
-        .fillna(df.get("sigla_da_torre"))
-        .astype("string")
-        .str.strip()
-    )
+    # utilitário para escolher a primeira coluna existente dentre candidatos
+    def pick(*cands):
+        for c in cands:
+            if c in df.columns:
+                return df[c]
+        return None
 
-    # NOME: preferir 'nome' senão 'nome_da_torre'
-    df["nome"] = (
-        df.get("nome")
-        .fillna(df.get("nome_da_torre"))
-        .astype("string")
-        .str.strip()
-    )
-
-    # ENDERECO: preferir 'endereco' senão 'endereço'
-    if "endereco" in df.columns:
-        df["endereco"] = df["endereco"].astype("string").str.strip()
-    elif "endereço" in df.columns:
-        df["endereco"] = df["endereço"].astype("string").str.strip()
-    else:
-        df["endereco"] = pd.NA
-
+    # SIGLA
+    s_sigla = pick("sigla", "sigla_da_torre", "site", "torre")
+    # NOME
+    s_nome  = pick("nome", "nome_da_torre")
+    # ENDERECO
+    s_end   = pick("endereco", "endereço")
     # DETENTORA
-    if "detentora" in df.columns:
-        df["detentora"] = df["detentora"].astype("string").str.strip()
-    else:
-        df["detentora"] = pd.NA
+    s_det   = pick("detentora")
+    # LAT/LON
+    s_lat   = pick("lat", "latitude")
+    s_lon   = pick("lon", "longitude")
+    # CAPACITADO (opcional)
+    s_cap   = pick("capacitado", "status_capacitado")
 
-    # Coordenadas: aceitar latitude/longitude ou lat/lon
-    # lat
-    lat_series = None
-    if "lat" in df.columns:
-        lat_series = df["lat"]
-    elif "latitude" in df.columns:
-        lat_series = df["latitude"]
-    # lon
-    lon_series = None
-    if "lon" in df.columns:
-        lon_series = df["lon"]
-    elif "longitude" in df.columns:
-        lon_series = df["longitude"]
+    out = pd.DataFrame()
+    out["sigla"]     = (s_sigla if s_sigla is not None else pd.Series([pd.NA]*len(df))).astype("string").str.strip()
+    out["nome"]      = (s_nome  if s_nome  is not None else pd.Series([pd.NA]*len(df))).astype("string").str.strip()
+    out["endereco"]  = (s_end   if s_end   is not None else pd.Series([pd.NA]*len(df))).astype("string").str.strip()
+    out["detentora"] = (s_det.astype("string").str.strip() if s_det is not None
+                        else pd.Series([pd.NA]*len(df), dtype="string"))
 
-    def _to_float(s):
+    def to_float(s):
+        if s is None:
+            return pd.Series([pd.NA]*len(df), dtype="float64")
         return (
-            s.astype(str)
-             .str.replace(",", ".", regex=False)
-             .replace("", pd.NA)
-             .pipe(pd.to_numeric, errors="coerce")
+            s.astype(str).str.replace(",", ".", regex=False)
+             .replace("", pd.NA).pipe(pd.to_numeric, errors="coerce")
         )
+    out["lat"] = to_float(s_lat)
+    out["lon"] = to_float(s_lon)
 
-    df["lat"] = _to_float(lat_series) if lat_series is not None else pd.NA
-    df["lon"] = _to_float(lon_series) if lon_series is not None else pd.NA
-
-    # CAPACITADO (se houver na própria tabela)
-    if "capacitado" in df.columns:
-        df["capacitado"] = df["capacitado"].astype("string").str.strip()
+    if s_cap is not None:
+        out["capacitado"] = s_cap.astype("string").str.strip()
     else:
-        df["capacitado"] = pd.NA
+        out["capacitado"] = pd.Series([pd.NA]*len(df), dtype="string")
 
-    # Saída final com as colunas esperadas
-    out = df[["sigla","nome","detentora","endereco","lat","lon","capacitado"]].copy()
     return out
 
 # ------------------------------------------------------------
@@ -413,20 +403,24 @@ def carregar_capacitados_lista():
       - None se a tabela não existir/vazia (mantém comportamento original).
     """
     try:
-        resp = supabase.table("capacitados").select("sigla, status").execute()
+        resp = supabase.table("capacitados").select("*").execute()
     except Exception:
         return None
 
     rows = resp.data or []
     if not rows:
-        return None  # manter comportamento original: None => não interferir
+        return None
 
     dfc = pd.DataFrame(rows)
     dfc.columns = dfc.columns.str.strip().str.lower()
     if "sigla" not in dfc.columns:
-        return None
+        for alt in ["sigla_da_torre", "site", "torre"]:
+            if alt in dfc.columns:
+                dfc = dfc.rename(columns={alt: "sigla"})
+                break
+        if "sigla" not in dfc.columns:
+            return None
 
-    # Se houver coluna de status, filtrar pelos "SIM"; se não, todas as siglas listadas contam
     if "status" in dfc.columns:
         mask_ok = dfc["status"].apply(is_yes) == True
         siglas_ok = dfc.loc[mask_ok, "sigla"].astype(str).str.upper().unique().tolist()
@@ -441,9 +435,10 @@ def carregar_capacitados_lista():
 @st.cache_data(show_spinner=False, ttl=60)
 def carregar_acessos_ok():
     try:
-        resp = supabase.table("acessos").select("sigla, tecnico, status").execute()
+        resp = supabase.table("acessos").select("*").execute()
     except Exception:
         return None
+
     rows = resp.data or []
     if not rows:
         return None
@@ -451,19 +446,23 @@ def carregar_acessos_ok():
     acc = pd.DataFrame(rows)
     acc.columns = acc.columns.str.strip().str.lower()
 
-    # Normalizar nomes esperados
     if "tecnico" not in acc.columns:
         for alt in ["técnico", "nome_tecnico", "colaborador"]:
             if alt in acc.columns:
                 acc = acc.rename(columns={alt: "tecnico"})
                 break
+
     if "sigla" not in acc.columns:
         for alt in ["sigla_da_torre", "site", "torre"]:
             if alt in acc.columns:
                 acc = acc.rename(columns={alt: "sigla"})
                 break
+
     if "sigla" not in acc.columns or "tecnico" not in acc.columns:
         return None
+
+    if "status" not in acc.columns:
+        acc["status"] = "ok"
 
     for c in ["sigla", "tecnico", "status"]:
         acc[c] = acc[c].astype("string").str.strip()
@@ -513,7 +512,7 @@ ACESSOS_OK = carregar_acessos_ok()
 # ------------------------------------------------------------
 @st.cache_data(show_spinner=False, ttl=30)
 def _count_enderecos():
-    resp = supabase.table("enderecos").select("id", count="exact").limit(1).execute()
+    resp = supabase.table("enderecos").select("*", count="exact").limit(1).execute()
     return resp.count or (len(resp.data) if resp.data is not None else 0)
 
 _curr_count = _count_enderecos()
@@ -763,7 +762,7 @@ with endereco_results_ct:
 
         if not geo:
             st.error("❌ Endereço não encontrado. Tente incluir número/bairro/cidade. "
-                    "Se persistir, refine o endereço ou tente outro próximo.")
+                     "Se persistir, refine o endereço ou tente outro próximo.")
         else:
             lat_cli, lon_cli = geo["lat"], geo["lon"]
             st.success("✅ Endereço localizado:")
@@ -858,6 +857,7 @@ with endereco_results_ct:
 
 st.caption("❤️ Desenvolvido por Raphael Robles - Stay hungry, stay foolish ! 🚀")
  
+
 
 
 
