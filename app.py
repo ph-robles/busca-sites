@@ -4,14 +4,12 @@
 # - Rotas/Matriz: OSRM (sem key) para distância/tempo por trajeto
 # - Detecção de cidade aprimorada (regex + fallback no endereço)
 # - Geocodificação robusta: normalização de entrada + duas tentativas no Nominatim
-# - Sem mensagens/diagnóstico na UI
 # - Corrige pd.NA em f-strings (sem usar `or` com pd.NA)
 # - Mantém toda a lógica de SIGLA e Acessos OK
 # - 'CAPACITADO' via coluna em 'enderecos' OU via tabela separada (lista de SIGLAs)
 # - Top3 sempre inclui o site capacitado mais próximo (se existir)
 # - Banner automático quando a base muda (contagem Supabase)
-# - Sugestões de SIGLA clicáveis como chips estilizados
-# - Fuzzy match leve (até 1 erro) na busca por SIGLA, sem auto-executar
+# - Sugestões de SIGLA clicáveis + fuzzy leve com salvaguardas
 # ============================================================
 
 import streamlit as st
@@ -99,9 +97,7 @@ def normalizar_sigla(sigla: str) -> str:
     if not isinstance(sigla, str):
         return ""
     s = sigla.strip().upper()
-    # Remove espaços e traços
     s = s.replace(" ", "").replace("-", "")
-    # Remove RJ no início (ex: RJDJU, RJ DJU, RJ-DJU)
     if s.startswith("RJ"):
         s = s[2:]
     return s
@@ -199,7 +195,7 @@ def detectar_cidade(nome: str, endereco: str | None = None) -> str | None:
     return None
 
 # ------------------------------------------------------------
-# Geocoding — normalização do endereço + Geoapify (opcional) + Nominatim
+# Geocoding — normalização + Geoapify (opcional) + Nominatim
 # ------------------------------------------------------------
 def _normalize_address_for_br(addr: str) -> str:
     if not isinstance(addr, str):
@@ -284,7 +280,7 @@ def osrm_table(origin_lat: float, origin_lon: float, dests: List[Tuple[float, fl
     dbg = {"status": None, "error_message": None}
     if not dests:
         dbg["status"] = "NO_DESTS"; return [], dbg
-    coords = [(origin_lon, origin_lat)] + [(lon, lat) for (lat, lon) in dests]  # ordem OSRM: lon,lat
+    coords = [(origin_lon, origin_lat)] + [(lon, lat) for (lat, lon) in dests]  # OSRM: lon,lat
     coord_str = ";".join([f"{lon},{lat}" for (lon, lat) in coords])
     url = f"https://router.project-osrm.org/table/v1/driving/{coord_str}"
     params = {"annotations": "duration,distance"}
@@ -314,83 +310,49 @@ def osrm_table(origin_lat: float, origin_lon: float, dests: List[Tuple[float, fl
         dbg["status"] = "EXCEPTION"; dbg["error_message"] = str(e); return [], dbg
 
 # ------------------------------------------------------------
-# Dados principais (Supabase: tabela 'enderecos') com normalização tolerante
+# Dados principais (Supabase: tabela 'enderecos') — colunas exatas
 # ------------------------------------------------------------
 @st.cache_data(show_spinner=False, ttl=60)
 def carregar_dados():
     """
-    Lê do Supabase (tabela 'enderecos') e normaliza os nomes de colunas para:
-    sigla, nome, detentora, endereco, lat, lon, capacitado.
-
-    Aceita variações comuns de import:
-      - sigla / sigla_da_torre / site / torre
-      - nome / nome_da_torre
-      - endereco / endereço
-      - lat / latitude
-      - lon / longitude
-      - capacitado / status_capacitado (opcional)
-      - detentora (opcional)
+    Lê do Supabase (tabela 'enderecos') e normaliza colunas para o app:
+    sigla, nome, detentora, endereco, lat, lon, capacitado
     """
     try:
-        # Seleciona tudo para evitar 400 por colunas inexistentes
-        resp = supabase.table("enderecos").select("*").execute()
+        resp = supabase.table("enderecos").select(
+            "id, sigla, nome, detentora, endereco, latitude, longitude, capacitado"
+        ).execute()
     except Exception as e:
-        st.error(f"Erro ao consultar tabela 'enderecos' no Supabase: {e}")
+        st.error(f"Erro ao consultar 'enderecos' no Supabase: {e}")
         return pd.DataFrame(columns=["sigla","nome","detentora","endereco","lat","lon","capacitado"])
 
     rows = resp.data or []
     df = pd.DataFrame(rows)
-
     if df.empty:
         st.warning("⚠️ Nenhum registro em 'enderecos'.")
         return pd.DataFrame(columns=["sigla","nome","detentora","endereco","lat","lon","capacitado"])
 
     df.columns = df.columns.str.strip().str.lower()
+    df = df.rename(columns={"latitude": "lat", "longitude": "lon"})
 
-    # utilitário para escolher a primeira coluna existente dentre candidatos
-    def pick(*cands):
-        for c in cands:
-            if c in df.columns:
-                return df[c]
-        return None
+    for col in ["sigla", "nome", "endereco", "detentora", "capacitado"]:
+        if col in df.columns:
+            df[col] = df[col].astype("string").str.strip()
 
-    # SIGLA
-    s_sigla = pick("sigla", "sigla_da_torre", "site", "torre")
-    # NOME
-    s_nome  = pick("nome", "nome_da_torre")
-    # ENDERECO
-    s_end   = pick("endereco", "endereço")
-    # DETENTORA
-    s_det   = pick("detentora")
-    # LAT/LON
-    s_lat   = pick("lat", "latitude")
-    s_lon   = pick("lon", "longitude")
-    # CAPACITADO (opcional)
-    s_cap   = pick("capacitado", "status_capacitado")
+    for col in ["lat", "lon"]:
+        if col in df.columns:
+            df[col] = (
+                df[col].astype(str)
+                .str.replace(",", ".", regex=False)
+                .replace("", pd.NA)
+                .pipe(pd.to_numeric, errors="coerce")
+            )
 
-    out = pd.DataFrame()
-    out["sigla"]     = (s_sigla if s_sigla is not None else pd.Series([pd.NA]*len(df))).astype("string").str.strip()
-    out["nome"]      = (s_nome  if s_nome  is not None else pd.Series([pd.NA]*len(df))).astype("string").str.strip()
-    out["endereco"]  = (s_end   if s_end   is not None else pd.Series([pd.NA]*len(df))).astype("string").str.strip()
-    out["detentora"] = (s_det.astype("string").str.strip() if s_det is not None
-                        else pd.Series([pd.NA]*len(df), dtype="string"))
+    for c in ["detentora", "capacitado"]:
+        if c not in df.columns:
+            df[c] = pd.NA
 
-    def to_float(s):
-        if s is None:
-            return pd.Series([pd.NA]*len(df), dtype="float64")
-        return (
-            s.astype(str).str.replace(",", ".", regex=False)
-             .replace("", pd.NA).pipe(pd.to_numeric, errors="coerce")
-        )
-    out["lat"] = to_float(s_lat)
-    out["lon"] = to_float(s_lon)
-
-    if s_cap is not None:
-        out["capacitado"] = s_cap.astype("string").str.strip()
-    else:
-        out["capacitado"] = pd.Series([pd.NA]*len(df), dtype="string")
-
-    return out
+    return df[["sigla","nome","detentora","endereco","lat","lon","capacitado"]]
 
 # ------------------------------------------------------------
 # Tabela "capacitados" (opcional, SIGLAs capacitados no Supabase)
@@ -403,7 +365,7 @@ def carregar_capacitados_lista():
       - None se a tabela não existir/vazia (mantém comportamento original).
     """
     try:
-        resp = supabase.table("capacitados").select("*").execute()
+        resp = supabase.table("capacitados").select("sigla, status").execute()
     except Exception:
         return None
 
@@ -414,12 +376,7 @@ def carregar_capacitados_lista():
     dfc = pd.DataFrame(rows)
     dfc.columns = dfc.columns.str.strip().str.lower()
     if "sigla" not in dfc.columns:
-        for alt in ["sigla_da_torre", "site", "torre"]:
-            if alt in dfc.columns:
-                dfc = dfc.rename(columns={alt: "sigla"})
-                break
-        if "sigla" not in dfc.columns:
-            return None
+        return None
 
     if "status" in dfc.columns:
         mask_ok = dfc["status"].apply(is_yes) == True
@@ -430,15 +387,14 @@ def carregar_capacitados_lista():
     return set(siglas_ok) if siglas_ok else None
 
 # ------------------------------------------------------------
-# Tabela "acessos" (técnicos com status ok) — opcional no Supabase
+# Tabela "acessos" (técnicos com status ok) — opcional
 # ------------------------------------------------------------
 @st.cache_data(show_spinner=False, ttl=60)
 def carregar_acessos_ok():
     try:
-        resp = supabase.table("acessos").select("*").execute()
+        resp = supabase.table("acessos").select("sigla, tecnico, status").execute()
     except Exception:
         return None
-
     rows = resp.data or []
     if not rows:
         return None
@@ -451,13 +407,11 @@ def carregar_acessos_ok():
             if alt in acc.columns:
                 acc = acc.rename(columns={alt: "tecnico"})
                 break
-
     if "sigla" not in acc.columns:
         for alt in ["sigla_da_torre", "site", "torre"]:
             if alt in acc.columns:
                 acc = acc.rename(columns={alt: "sigla"})
                 break
-
     if "sigla" not in acc.columns or "tecnico" not in acc.columns:
         return None
 
@@ -508,7 +462,7 @@ df = unificar_capacitado(df_raw, siglas_cap_set)
 ACESSOS_OK = carregar_acessos_ok()
 
 # ------------------------------------------------------------
-# Detector de atualização da base de dados (via contagem no Supabase)
+# Detector de atualização da base (contagem Supabase)
 # ------------------------------------------------------------
 @st.cache_data(show_spinner=False, ttl=30)
 def _count_enderecos():
@@ -519,10 +473,9 @@ _curr_count = _count_enderecos()
 _prev_count = st.session_state.get("enderecos_count", None)
 if _prev_count is None:
     st.session_state["enderecos_count"] = _curr_count
-else:
-    if _curr_count != _prev_count:
-        st.session_state["enderecos_count"] = _curr_count
-        st.info(f"**Base de dados atualizada!**\n\n```\n{BANNER_MSG}\n```")
+elif _curr_count != _prev_count:
+    st.session_state["enderecos_count"] = _curr_count
+    st.info(f"**Base de dados atualizada!**\n\n```\n{BANNER_MSG}\n```")
 
 # ------------------------------------------------------------
 # UI
@@ -543,18 +496,13 @@ lista_siglas = sorted(
     df["sigla"].dropna().astype(str).str.upper().unique().tolist()
 )
 
-# ---------- Estado inicial & hidratação ----------
 if "busca_sigla_input" not in st.session_state:
     st.session_state["busca_sigla_input"] = ""
 
-# Chip clicado anteriormente?
 if "busca_sigla_pending" in st.session_state:
     st.session_state["busca_sigla_input"] = st.session_state.pop("busca_sigla_pending")
 
-# Auto-executar busca (chip)?
 auto_trigger = st.session_state.pop("do_busca_sigla", False)
-
-# Container para resultados
 sigla_results_ct = st.container()
 
 # ---------- Auxiliares (fuzzy + sugestões) ----------
@@ -593,7 +541,7 @@ def _gerar_sugestoes(busca_raw: str, candidatos: list[str], limite: int = 8) -> 
         pref.extend(substr)
         seen.update(substr)
 
-    # 3) Fuzzy leve (distância <= 1)
+    # 3) Fuzzy leve (distância <= 1) com filtro
     if len(pref) < limite:
         fuzzy = []
         for s, n in pares:
@@ -601,23 +549,24 @@ def _gerar_sugestoes(busca_raw: str, candidatos: list[str], limite: int = 8) -> 
                 continue
             d = _levenshtein(n, bn)
             if d <= 1:
+                # Extra: se usuário digitou letra, evita sugerir sigla que comece com dígito
+                if bn[:1].isalpha() and not n[:1].isalpha():
+                    continue
                 fuzzy.append((d, s))
         fuzzy = [s for _, s in sorted(fuzzy, key=lambda x: (x[0], x[1]))]
         pref.extend(fuzzy)
 
     return pref[:limite]
 
-# Callback dos chips
 def _select_sugestao(value: str):
     st.session_state["busca_sigla_pending"] = value
     st.session_state["do_busca_sigla"] = True
 
-# Form de busca
 with st.form("form_sigla", clear_on_submit=False):
     busca = st.text_input("Digite a sigla do site/ERB", key="busca_sigla_input")
     submitted = st.form_submit_button("OK")
 
-# CSS dos chips
+# CSS chips
 st.markdown("""
 <style>
 #chips-scope { margin-top: .25rem; }
@@ -671,24 +620,44 @@ if busca:
     else:
         st.markdown("Nenhuma sugestão encontrada.")
 
-# Execução da busca
+# Execução da busca — com salvaguardas contra falso-positivo
 if (submitted or auto_trigger) and st.session_state.get("busca_sigla_input"):
     busca_val = st.session_state.get("busca_sigla_input", "")
     busca_norm = normalizar_sigla(busca_val)
 
+    # Pré-calcula normalizados
+    norm_map = {s: normalizar_sigla(s) for s in lista_siglas}
+
     # 1) Match exato (normalizado)
     sigla_encontrada = None
     for s_ in lista_siglas:
-        if normalizar_sigla(s_) == busca_norm:
+        if norm_map[s_] == busca_norm:
             sigla_encontrada = s_
             break
 
-    # 2) Fuzzy leve (<= 1 erro) se não achou exato
+    # 2) Prefixo
     if sigla_encontrada is None:
-        dists = [(s_, _levenshtein(normalizar_sigla(s_), busca_norm)) for s_ in lista_siglas]
+        candidatos_pref = [s_ for s_ in lista_siglas if norm_map[s_].startswith(busca_norm)]
+        if candidatos_pref:
+            sigla_encontrada = sorted(candidatos_pref)[0]
+
+    # 3) Contains
+    if sigla_encontrada is None:
+        candidatos_cont = [s_ for s_ in lista_siglas if busca_norm in norm_map[s_]]
+        if candidatos_cont:
+            sigla_encontrada = sorted(candidatos_cont)[0]
+
+    # 4) Fuzzy SEGURO (último recurso)
+    if sigla_encontrada is None and busca_norm:
+        dists = [(s_, _levenshtein(norm_map[s_], busca_norm)) for s_ in lista_siglas]
         s_best, d_best = min(dists, key=lambda x: x[1]) if dists else (None, 999)
-        if d_best <= 1:
-            sigla_encontrada = s_best
+
+        if s_best and d_best == 1:
+            same_first_char = norm_map[s_best][:1] == busca_norm[:1]
+            starts_with      = norm_map[s_best].startswith(busca_norm)
+            contains_term    = (busca_norm in norm_map[s_best])
+            if same_first_char or starts_with or contains_term:
+                sigla_encontrada = s_best
 
     if sigla_encontrada:
         df_f = df[df["sigla"].astype(str).str.upper() == sigla_encontrada].copy()
@@ -856,7 +825,7 @@ with endereco_results_ct:
 
 
 st.caption("❤️ Desenvolvido por Raphael Robles - Stay hungry, stay foolish ! 🚀")
- 
+
 
 
 
