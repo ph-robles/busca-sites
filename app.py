@@ -7,11 +7,11 @@
 # - Sem mensagens/diagnóstico na UI
 # - Corrige pd.NA em f-strings (sem usar `or` com pd.NA)
 # - Mantém toda a lógica de SIGLA e Acessos OK
-# - NOVO: 'CAPACITADO' via coluna em 'enderecos' OU via aba separada (lista de SIGLAs)
-# - NOVO: Top3 sempre inclui o site capacitado mais próximo (se existir)
-# - NOVO: Banner automático quando a base muda
-# - NOVO: Sugestões de SIGLA clicáveis como chips estilizados
-# - NOVO: Fuzzy match leve (até 1 erro) na busca por SIGLA, sem auto-executar
+# - 'CAPACITADO' via coluna em 'enderecos' OU via aba separada (lista de SIGLAs)
+# - Top3 sempre inclui o site capacitado mais próximo (se existir)
+# - Banner automático quando a base muda
+# - Sugestões de SIGLA clicáveis como chips estilizados (fuzzy <= 1 erro)
+# - NOVO: Excel robusto (openpyxl obrigatório), uploader caso arquivo ausente
 # ============================================================
 
 import streamlit as st
@@ -23,7 +23,9 @@ import numpy as np
 import math
 import re
 import os
-from typing import List, Tuple
+from typing import List, Tuple, Optional
+import importlib.util
+from pathlib import Path
 
 # ------------------------------------------------------------
 # Config
@@ -34,6 +36,43 @@ st.set_page_config(page_title="Endereços dos Sites RJ", page_icon="📡", layou
 # Secrets (opcional): GEOAPIFY
 # ------------------------------------------------------------
 GEOAPIFY_KEY = (st.secrets.get("GEOAPIFY_KEY", "") or "").strip()
+
+# ------------------------------------------------------------
+# Helpers de ambiente/dependências/arquivo Excel
+# ------------------------------------------------------------
+EXCEL_PATH = Path("enderecos.xlsx")
+
+def _check_dependency(pkg_name: str) -> bool:
+    return importlib.util.find_spec(pkg_name) is not None
+
+def _require_openpyxl():
+    if not _check_dependency("openpyxl"):
+        st.error(
+            "❌ Dependência ausente: **openpyxl**.\n\n"
+            "Se estiver rodando localmente, execute:\n\n"
+            "```bash\npip install --upgrade openpyxl\n```\n\n"
+            "Se estiver no Streamlit Cloud/servidor, adicione ao **requirements.txt**:\n\n"
+            "```\nopenpyxl>=3.1.2\n```"
+        )
+        st.stop()
+
+def _ensure_excel_available():
+    """Garante que o arquivo Excel existe; se não existir, oferece uploader e salva na raiz."""
+    if EXCEL_PATH.exists():
+        return
+    st.warning("⚠️ Arquivo `enderecos.xlsx` não foi encontrado na raiz do app.")
+    up = st.file_uploader(
+        "Envie o arquivo `enderecos.xlsx`",
+        type=["xlsx"],
+        accept_multiple_files=False,
+        key="upload_enderecos"
+    )
+    if up is None:
+        st.stop()
+    with open(EXCEL_PATH, "wb") as f:
+        f.write(up.getbuffer())
+    st.info("✅ Arquivo recebido e salvo como `enderecos.xlsx`. Recarregando o app…")
+    _rerun()
 
 # ------------------------------------------------------------
 # Helper: rerun compatível (Streamlit novo/antigo)
@@ -98,7 +137,7 @@ def _to_str_lower(x):
     except Exception:
         return None
 
-def is_yes(val) -> bool | None:
+def is_yes(val) -> Optional[bool]:
     """Retorna True/False/None a partir de variações de sim/não."""
     if val is pd.NA or pd.isna(val):
         return None
@@ -119,7 +158,7 @@ def capacitado_badge(val) -> str:
         return "❌ **Não capacitado**"
     return "—"
 
-def _file_fingerprint(path: str) -> str | None:
+def _file_fingerprint(path: str) -> Optional[str]:
     """Fingerprint simples por mtime e tamanho do arquivo."""
     try:
         stt = os.stat(path)
@@ -168,7 +207,7 @@ MUNICIPIOS_RJ = [
 MUNI_IDX = {strip_accents(n).lower(): n for n in MUNICIPIOS_RJ}
 _CITY_PATTERNS = {key: re.compile(rf"\b{re.escape(key)}\b") for key in MUNI_IDX.keys()}
 
-def _match_city_base(texto: str) -> str | None:
+def _match_city_base(texto: str) -> Optional[str]:
     if not isinstance(texto, str) or not texto.strip():
         return None
     base = strip_accents(texto).lower()
@@ -178,7 +217,7 @@ def _match_city_base(texto: str) -> str | None:
             ultimo = MUNI_IDX[key]
     return ultimo
 
-def detectar_cidade(nome: str, endereco: str | None = None) -> str | None:
+def detectar_cidade(nome: str, endereco: Optional[str] = None) -> Optional[str]:
     city = _match_city_base(nome)
     if city:
         return city
@@ -235,7 +274,7 @@ def geocode_nominatim(address: str, strict_rj: bool = True):
         dbg["status"] = "MISSING_ADDRESS"
         return None, dbg
     try:
-        time.sleep(1.0)
+        time.sleep(1.0)  # Respeita rate limit
         params = {"q": address, "format": "json", "limit": 1, "countrycodes": "br", "accept-language": "pt-BR"}
         headers = {"User-Agent": "busca-sites-b2b/1.0 (contato: seu-email@exemplo.com)"}
         if strict_rj:
@@ -306,7 +345,24 @@ def osrm_table(origin_lat: float, origin_lon: float, dests: List[Tuple[float, fl
 # ------------------------------------------------------------
 @st.cache_data(show_spinner=False)
 def carregar_dados():
-    df = pd.read_excel("enderecos.xlsx", sheet_name="enderecos", engine="openpyxl")
+    # Garante arquivo presente (ou pede upload) e dependência instalada
+    _ensure_excel_available()
+    _require_openpyxl()
+
+    # Lê a aba principal
+    try:
+        df = pd.read_excel(EXCEL_PATH, sheet_name="enderecos", engine="openpyxl")
+    except ValueError:
+        st.error(
+            "❌ A aba **enderecos** não foi encontrada no arquivo Excel.\n"
+            "Verifique se o nome da planilha é exatamente `enderecos`."
+        )
+        st.stop()
+    except Exception as e:
+        st.exception(e)
+        st.stop()
+
+    # Normalizações
     df.columns = df.columns.str.strip().str.lower()
     df = df.rename(columns={
         "sigla_da_torre": "sigla",
@@ -328,9 +384,9 @@ def carregar_dados():
             )
     if "detentora" not in df.columns:
         df["detentora"] = pd.NA
-    # Se existir 'capacitado' na própria aba, apenas padroniza texto
     if "capacitado" in df.columns:
         df["capacitado"] = df["capacitado"].astype("string").str.strip()
+
     return df
 
 # ------------------------------------------------------------
@@ -345,44 +401,55 @@ def carregar_capacitados_lista():
     Se não houver coluna de status, assume que TODAS as SIGLAs listadas são 'SIM'.
     Retorna: set de SIGLAs (uppercase) capacitados. Ou None se não houver aba válida.
     """
+    _ensure_excel_available()
+    _require_openpyxl()
+
     candidate_sheets = ["capacitados", "capacitacao", "cap_ativos"]
-    wb_path = "enderecos.xlsx"
+
     for sh in candidate_sheets:
         try:
-            dfc = pd.read_excel(wb_path, sheet_name=sh, engine="openpyxl")
-            if dfc is None or dfc.empty:
-                continue
-            dfc.columns = dfc.columns.str.strip().str.lower()
-
-            # Detecta coluna de SIGLA
-            sigla_col = None
-            for alt in ["sigla", "sigla_da_torre", "site", "torre"]:
-                if alt in dfc.columns:
-                    sigla_col = alt
-                    break
-            if not sigla_col:
-                continue
-
-            # Detecta coluna de status (opcional)
-            status_col = None
-            for alt in ["capacitado", "status", "ativo", "habilitado"]:
-                if alt in dfc.columns:
-                    status_col = alt
-                    break
-
-            dfc = dfc.dropna(subset=[sigla_col]).copy()
-            dfc[sigla_col] = dfc[sigla_col].astype("string").str.strip()
-
-            if status_col:
-                mask_ok = dfc[status_col].apply(is_yes) == True
-                siglas_ok = dfc.loc[mask_ok, sigla_col].astype(str).str.upper().unique().tolist()
-            else:
-                siglas_ok = dfc[sigla_col].astype(str).str.upper().unique().tolist()
-
-            return set(siglas_ok) if siglas_ok else set()
-        except Exception:
-            # tenta próxima aba
+            dfc = pd.read_excel(EXCEL_PATH, sheet_name=sh, engine="openpyxl")
+        except ValueError:
+            # Aba não existe, tenta próxima
             continue
+        except Exception as e:
+            # Qualquer outro problema ao ler a planilha
+            st.warning(f"⚠️ Não foi possível ler a aba `{sh}`: {e}")
+            continue
+
+        if dfc is None or dfc.empty:
+            continue
+
+        dfc.columns = dfc.columns.str.strip().str.lower()
+
+        # Detecta coluna de SIGLA
+        sigla_col = None
+        for alt in ["sigla", "sigla_da_torre", "site", "torre"]:
+            if alt in dfc.columns:
+                sigla_col = alt
+                break
+        if not sigla_col:
+            continue
+
+        # Detecta coluna de status (opcional)
+        status_col = None
+        for alt in ["capacitado", "status", "ativo", "habilitado"]:
+            if alt in dfc.columns:
+                status_col = alt
+                break
+
+        dfc = dfc.dropna(subset=[sigla_col]).copy()
+        dfc[sigla_col] = dfc[sigla_col].astype("string").str.strip()
+
+        if status_col:
+            mask_ok = dfc[status_col].apply(is_yes) == True
+            siglas_ok = dfc.loc[mask_ok, sigla_col].astype(str).str.upper().unique().tolist()
+        else:
+            siglas_ok = dfc[sigla_col].astype(str).str.upper().unique().tolist()
+
+        return set(siglas_ok) if siglas_ok else set()
+
+    # Nenhuma aba válida encontrada
     return None
 
 # ------------------------------------------------------------
@@ -390,10 +457,18 @@ def carregar_capacitados_lista():
 # ------------------------------------------------------------
 @st.cache_data(show_spinner=False)
 def carregar_acessos_ok():
+    _ensure_excel_available()
+    _require_openpyxl()
+
     try:
-        acc = pd.read_excel("enderecos.xlsx", sheet_name="acessos", engine="openpyxl")
-    except Exception:
+        acc = pd.read_excel(EXCEL_PATH, sheet_name="acessos", engine="openpyxl")
+    except ValueError:
+        # Não há aba `acessos`
         return None
+    except Exception as e:
+        st.warning(f"⚠️ Não foi possível ler a aba `acessos`: {e}")
+        return None
+
     acc.columns = acc.columns.str.strip().str.lower()
 
     if "tecnico" not in acc.columns:
@@ -424,7 +499,7 @@ def carregar_acessos_ok():
 # ------------------------------------------------------------
 # Unificação do status 'capacitado' (coluna local OU aba separada)
 # ------------------------------------------------------------
-def unificar_capacitado(df: pd.DataFrame, siglas_cap_set: set | None):
+def unificar_capacitado(df: pd.DataFrame, siglas_cap_set: Optional[set]):
     """
     Garante que df tenha:
       - df['capacitado'] -> para exibição ("SIM"/"NÃO"/NA)
@@ -461,7 +536,7 @@ ACESSOS_OK = carregar_acessos_ok()
 # ------------------------------------------------------------
 # Detector de atualização da base de dados (enderecos.xlsx)
 # ------------------------------------------------------------
-_curr_fp = _file_fingerprint("enderecos.xlsx")
+_curr_fp = _file_fingerprint(str(EXCEL_PATH))
 _prev_fp = st.session_state.get("enderecos_fp", None)
 if _prev_fp is None:
     st.session_state["enderecos_fp"] = _curr_fp
@@ -688,6 +763,7 @@ with sigla_results_ct:
             st.info(f"**👤 Técnicos com acesso liberado:**\n{lista_md}")
 
             st.markdown("---")
+
 # ============================================================
 # -------------------- BUSCA POR ENDEREÇO --------------------
 # (Resultados logo abaixo da caixa de endereço)
@@ -713,7 +789,7 @@ with endereco_results_ct:
 
         if not geo:
             st.error("❌ Endereço não encontrado. Tente incluir número/bairro/cidade. "
-                    "Se persistir, refine o endereço ou tente outro próximo.")
+                     "Se persistir, refine o endereço ou tente outro próximo.")
         else:
             lat_cli, lon_cli = geo["lat"], geo["lon"]
             st.success("✅ Endereço localizado:")
@@ -805,8 +881,9 @@ with endereco_results_ct:
                         st.link_button("🚗 Traçar rota a partir do cliente", rota)
                     st.markdown("---")
 
-
 st.caption("❤️ Desenvolvido por Raphael Robles - Stay hungry, stay foolish ! 🚀")
+``
+
 
 
 
