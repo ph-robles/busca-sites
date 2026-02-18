@@ -64,7 +64,8 @@ with col2:
 
 st.markdown("---")
 st.markdown(
-    '<div class="footer">❤️ Desenvolvido por Raphael Robles — © 2026 • Todos os direitos reservados 🚀</div>',
+    '<div class="footer">❤️ Desenvolvido por Raphael Robles — '
+    '<a href="pages/3_ℹ️_Sobre.py">© 2026 • 🚀 </a> Sobre</div>',
     unsafe_allow_html=True
 )
 
