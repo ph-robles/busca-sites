@@ -1,0 +1,6 @@
+streamlit
+pandas
+numpy
+openpyxl
+requests
+supabase>=2.4.0
