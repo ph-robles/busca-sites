@@ -167,7 +167,7 @@ st.markdown("---")
 c1, c2, c3 = st.columns([1.2, 1, 1.5])
 with c1:
     if st.button("🏠 Voltar para a Home"):
-        st.switch_page("Home.py")  # ajuste o nome conforme seu arquivo principal
+        st.switch_page("app.py")  # ajuste o nome conforme seu arquivo principal
 
 with c2:
     st.page_link("pages/1_🔍_Busca_por_SIGLA.py", label="Ir para: Buscar por SIGLA", icon="🔍")
