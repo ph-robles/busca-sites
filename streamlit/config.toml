@@ -1,0 +1,14 @@
+[theme]
+primaryColor="#0084ff"        # Azul profissional
+backgroundColor="#f9f9fb"     # Fundo clean
+secondaryBackgroundColor="#ffffff"
+textColor="#000000"
+font="sans serif"
+
+[browser]
+gatherUsageStats = false
+
+[server]
+headless = true
+port = 8501
+enableCORS = false
