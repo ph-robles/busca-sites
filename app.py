@@ -64,7 +64,7 @@ with col2:
 
 st.markdown("---")
 st.markdown(
-    '<div class="footer">❤️ Desenvolvido por Raphael Robles —  © 2026 • 🚀  '
+    '<div class="footer" style='text-align: center;>❤️ Desenvolvido por Raphael Robles —  © 2026 • 🚀  '
     '<a href="https://busca-sites-b2b.streamlit.app/Sobre">Sobre o App TowerLink</a> </div>',
     unsafe_allow_html=True
 )
