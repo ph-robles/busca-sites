@@ -65,7 +65,7 @@ with col2:
 st.markdown("---")
 st.markdown(
     '<div class="footer">❤️ Desenvolvido por Raphael Robles —  © 2026 • 🚀  '
-    '<a href="pages/3_ℹ️_Sobre.py"></a> Sobre</div>',
+    '<a href="pages/3_ℹ️_Sobre.py">Sobre o App TowerLink</a> </div>',
     unsafe_allow_html=True
 )
 
