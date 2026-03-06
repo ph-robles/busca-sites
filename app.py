@@ -58,7 +58,7 @@ with col1:
         st.switch_page("pages/1_🔍_Busca_por_SIGLA.py")
 
 with col2:
-    if st.button("🧭 Buscar por ENDEREÇO", use_container_width=True):
+    if st.button("🧭 Buscar por ENDEREÇO DO CLIENTE", use_container_width=True):
         st.switch_page("pages/2_🧭_Busca_por_ENDEREÇO.py")
 
 
